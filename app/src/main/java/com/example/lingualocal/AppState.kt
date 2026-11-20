@@ -6,6 +6,8 @@ import java.util.concurrent.atomic.AtomicLong
 
 data class Caption(
     val id: Long,
+    /** Wall-clock time the speech started (System.currentTimeMillis). */
+    val time: Long = System.currentTimeMillis(),
     val heard: String = "",
     val translation: String = "",
     val done: Boolean = false,
@@ -25,6 +27,9 @@ object AppState {
     val vadProbability = MutableStateFlow(0f)
     val speechActive = MutableStateFlow(false)
     val echoGuard = MutableStateFlow(false)
+
+    /** Speak translations out loud. Off = text only, and the mic never pauses for our own voice. */
+    val speakAloud = MutableStateFlow(true)
 
     val captions = MutableStateFlow<List<Caption>>(emptyList())
     private val nextId = AtomicLong(1)

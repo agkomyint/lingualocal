@@ -33,6 +33,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -56,6 +58,9 @@ import com.example.lingualocal.Caption
 import com.example.lingualocal.ai.HybridAssistant
 import com.example.lingualocal.ai.OfflineTranslator
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private val Accent = Color(0xFF4FD1A5)
 private val Muted = Color(0xFF8A93A3)
@@ -108,7 +113,9 @@ fun LinguaScreen(onToggleListening: () -> Unit) {
             }
         }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(8.dp))
+        SpeakToggle()
+        Spacer(Modifier.height(8.dp))
         RuntimePanel()
         Spacer(Modifier.height(12.dp))
 
@@ -132,6 +139,32 @@ fun LinguaScreen(onToggleListening: () -> Unit) {
         TypeToTranslate()
     }
 }
+
+@Composable
+private fun SpeakToggle() {
+    val speak by AppState.speakAloud.collectAsStateWithLifecycle()
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Surface)
+            .clickable { AppState.speakAloud.value = !speak }.padding(horizontal = 14.dp, vertical = 6.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("Speak translations aloud", color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp)
+            Text(
+                if (speak) "On · mic pauses while the app speaks (unless headphones are connected)"
+                else "Off · text only, the mic never pauses",
+                color = Muted, fontSize = 12.sp,
+            )
+        }
+        Switch(
+            checked = speak,
+            onCheckedChange = { AppState.speakAloud.value = it },
+            colors = SwitchDefaults.colors(checkedTrackColor = Accent),
+        )
+    }
+}
+
+private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
 @Composable
 private fun RuntimePanel() {
@@ -204,6 +237,11 @@ private fun CaptionCard(caption: Caption) {
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(14.dp)) {
+            Text(
+                timeFormat.format(Date(caption.time)) + if (caption.done) "" else " · live",
+                color = Accent, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+            )
+            Spacer(Modifier.height(4.dp))
             if (caption.heard.isNotBlank()) Text(caption.heard.trim(), color = Muted, fontSize = 15.sp)
             if (caption.translation.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))

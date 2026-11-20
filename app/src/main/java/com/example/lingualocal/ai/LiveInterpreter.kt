@@ -67,10 +67,14 @@ class LiveInterpreter(private val player: PcmPlayer) {
     suspend fun run(audio: ReceiveChannel<ByteArray>) = coroutineScope {
         // Sender: waits for a live session, so audio buffers (instead of being lost) while reconnecting.
         launch {
+            var sent = 0L
+            var lastLogged = 0L
             for (chunk in audio) {
                 val s = session.filterNotNull().first()
                 try {
                     s.sendAudioRealtime(InlineData(chunk, MIME_PCM_16K))
+                    sent += chunk.size
+                    if (sent - lastLogged >= 32_000) { Log.d(TAG, "sent ${sent / 32_000}s of audio to Gemini"); lastLogged = sent }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -91,6 +95,10 @@ class LiveInterpreter(private val player: PcmPlayer) {
                 AppState.liveStatus.value = "Live · listening"
                 backoffMs = 1_000L
                 s.receive().collect { msg ->
+                    if (msg is LiveServerContent) {
+                        Log.d(TAG, "server: in=${msg.inputTranscription?.text} out=${msg.outputTranscription?.text} " +
+                            "audioParts=${msg.content?.parts?.count { it is InlineDataPart }} turnComplete=${msg.turnComplete} interrupted=${msg.interrupted}")
+                    } else Log.d(TAG, "server: ${msg::class.simpleName}")
                     when (msg) {
                         is LiveServerContent -> onContent(msg)
                         is LiveSessionResumptionUpdate ->
@@ -124,7 +132,9 @@ class LiveInterpreter(private val player: PcmPlayer) {
         if (msg.interrupted) player.flush()
 
         msg.content?.parts?.forEach { part ->
-            if (part is InlineDataPart && part.mimeType.startsWith("audio/pcm")) player.enqueue(part.inlineData)
+            if (part is InlineDataPart && part.mimeType.startsWith("audio/pcm") && AppState.speakAloud.value) {
+                player.enqueue(part.inlineData)
+            }
         }
         msg.inputTranscription?.text?.takeIf { it.isNotEmpty() }?.let { t ->
             val id = openCaption ?: AppState.newCaption().also { openCaption = it }

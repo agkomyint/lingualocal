@@ -103,6 +103,8 @@ class ListenService : LifecycleService() {
 
         launch(Dispatchers.IO) { interpreter.run(audioOut) }
         launch(Dispatchers.IO) { player.run() }
+        // Switching "Speak translations" off cuts any speech that is already playing.
+        launch { AppState.speakAloud.collect { if (!it) player.flush() } }
         try {
             withContext(Dispatchers.IO) { micLoop(this, vad, player, audioOut) }
         } finally {
@@ -133,6 +135,8 @@ class ListenService : LifecycleService() {
         var headset = false
         var lastDeviceCheck = 0L
         var lastUiUpdate = 0L
+        var lastLog = 0L
+        var sentBytes = 0L
 
         recorder.startRecording()
         try {
@@ -175,6 +179,7 @@ class ListenService : LifecycleService() {
                     }
                     batch.write(bytes)
                     if (batch.size() >= BATCH_BYTES) {
+                        sentBytes += batch.size()
                         out.trySend(batch.toByteArray())
                         batch.reset()
                     }
@@ -189,6 +194,10 @@ class ListenService : LifecycleService() {
                 }
                 speaking = nowSpeaking
 
+                if (now - lastLog > 2_000) {
+                    Log.d(TAG, "mic rms=%.4f vad=%.2f speaking=%b echoGuard=%b sentBytes=%d".format(rms, prob, speaking, echoGuard, sentBytes))
+                    lastLog = now
+                }
                 if (now - lastUiUpdate > 80) {
                     AppState.micLevel.value = (rms * 6f).coerceIn(0f, 1f)
                     AppState.vadProbability.value = prob
