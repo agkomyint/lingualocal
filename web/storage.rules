@@ -1,0 +1,12 @@
+rules_version = '2';
+// Recordings and saved voices: users/{uid}/projects/{pid}/audio/*, owner only, audio up to 5 MB.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /users/{uid}/{allPaths=**} {
+      allow read, delete: if request.auth != null && request.auth.uid == uid;
+      allow create, update: if request.auth != null && request.auth.uid == uid
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('audio/.*');
+    }
+  }
+}
