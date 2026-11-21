@@ -38,7 +38,7 @@ class AudioChunk(val segmentId: Long, val bytes: ByteArray)
  * While disconnected, preview audio is dropped (the segment itself is kept and translated later).
  */
 @OptIn(PublicPreviewAPI::class)
-class LiveInterpreter {
+class LiveInterpreter(private val space: com.example.lingualocal.ProjectSpace) {
 
     private val model by lazy {
         Firebase.ai(backend = GenerativeBackend.googleAI()).liveModel(
@@ -52,6 +52,8 @@ class LiveInterpreter {
     }
 
     @Volatile private var session: LiveSession? = null
+    /** The card whose audio was streamed last: live words belong to it, not to a card that just started. */
+    @Volatile private var lastSegment = -1L
 
     suspend fun run(audio: ReceiveChannel<AudioChunk>) = coroutineScope {
         launch {
@@ -59,6 +61,7 @@ class LiveInterpreter {
                 val s = session ?: continue
                 try {
                     s.sendAudioRealtime(InlineData(chunk.bytes, MIME_PCM_16K))
+                    lastSegment = chunk.segmentId
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -114,12 +117,33 @@ class LiveInterpreter {
     }
 
     private fun onContent(msg: LiveServerContent) {
-        val t = msg.inputTranscription?.text?.takeIf { it.isNotBlank() } ?: return
-        // Show it on the newest card that is still being recorded or waiting for its translation.
-        val target = AppState.captions.value.lastOrNull {
-            !it.mine && (it.status == SegmentStatus.RECORDING || it.status == SegmentStatus.QUEUED)
-        } ?: return
-        AppState.updateCaption(target.id) { if (it.done) it else it.copy(preview = it.preview + t) }
+        val raw = msg.inputTranscription?.text?.takeIf { it.isNotBlank() } ?: return
+        val t = keepPairScripts(raw, space.pair) ?: return
+        // Show it on the card whose audio it came from (words arrive a little after the audio).
+        val target = space.caption(lastSegment)?.takeIf { !it.mine && !it.done } ?: return
+        space.updateCaption(target.id) { if (it.done) it else it.copy(preview = it.preview + t) }
+    }
+
+    /**
+     * Live speech-to-text can't be told which languages to expect, so it sometimes writes words in a third
+     * language (Hindi, Chinese…). Drops a chunk that is mostly in other scripts, and stray letters from them.
+     */
+    private fun keepPairScripts(text: String, pair: com.example.lingualocal.data.LangPair): String? {
+        fun scriptOf(ch: Char): String? = when {
+            ch in 'A'..'Z' || ch in 'a'..'z' -> com.example.lingualocal.data.Lang.EN
+            ch in '฀'..'๿' -> com.example.lingualocal.data.Lang.TH
+            ch in 'က'..'႟' || ch in 'ꧠ'..'꧿' || ch in 'ꩠ'..'ꩿ' -> com.example.lingualocal.data.Lang.MY
+            Character.isLetter(ch) -> "other"
+            else -> null // digits, spaces, punctuation, combining marks of the scripts above
+        }
+        val allowed = setOf(pair.a, pair.b)
+        val letters = text.mapNotNull { scriptOf(it) }
+        if (letters.isEmpty()) return text
+        if (letters.count { it in allowed } * 2 < letters.size) {
+            Log.d(TAG, "preview dropped (wrong language): $text")
+            return null
+        }
+        return text.filter { ch -> scriptOf(ch).let { it == null || it in allowed } }
     }
 
     private companion object {

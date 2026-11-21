@@ -43,7 +43,11 @@ class Speaker(context: Context) {
         if (tts.setLanguage(com.example.lingualocal.data.Lang.locale(com.example.lingualocal.data.Lang.of(text))) < TextToSpeech.LANG_AVAILABLE) {
             remember(text)
             AppState.ttsSpeaking.value = true
-            com.example.lingualocal.ai.CloudVoice.speak(text, flush = interrupt, onDone = { if (!tts.isSpeaking) AppState.ttsSpeaking.value = false })
+            val done = { if (!tts.isSpeaking) AppState.ttsSpeaking.value = false }
+            val piece = id.removePrefix("seg-").toLongOrNull()
+            // A piece: one Gemini request makes the voice, it's saved, and that copy is played (no second request).
+            if (piece != null) TranslationVoice.speakPiece(piece, done)
+            else com.example.lingualocal.ai.CloudVoice.speak(text, flush = interrupt, onDone = done)
             return
         }
         remember(text)
@@ -54,6 +58,7 @@ class Speaker(context: Context) {
     fun stop() {
         tts.stop()
         com.example.lingualocal.ai.CloudVoice.stop()
+        TranslationVoice.stopSpeaking()
         AppState.ttsSpeaking.value = false
     }
 

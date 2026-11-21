@@ -21,7 +21,10 @@ class LinguaApp : Application() {
         com.example.lingualocal.ai.AskAssistant.init(this)
         // Projects (recordings and captions) are kept on the phone until the user deletes them.
         com.example.lingualocal.data.ProjectStore.init(this)
+        com.example.lingualocal.audio.People.init(this)
+        com.example.lingualocal.ai.ProjectNamer.init()
         com.example.lingualocal.audio.PlayAll.init(this)
+        com.example.lingualocal.audio.TranslationVoice.init(this)
         com.example.lingualocal.audio.SegmentAudio.clearLegacy(this)
         com.example.lingualocal.ai.SegmentTranslator.clearParked(this)
 

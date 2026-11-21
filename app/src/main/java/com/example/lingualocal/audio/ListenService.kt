@@ -65,6 +65,8 @@ class ListenService : LifecycleService() {
     /** Set when listening to phone audio (other apps' sound) instead of the mic. */
     private var projection: android.media.projection.MediaProjection? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    /** The project this session records into, fixed for the whole session wherever the user looks. */
+    private lateinit var space: com.example.lingualocal.ProjectSpace
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
@@ -92,6 +94,7 @@ class ListenService : LifecycleService() {
             }, android.os.Handler(mainLooper))
         }
         if (pipeline == null) {
+            space = com.example.lingualocal.data.ProjectStore.startRecording() ?: run { stopSelf(); return START_NOT_STICKY }
             AppState.runningSource.value = if (projection != null) com.example.lingualocal.AudioSource.PHONE else com.example.lingualocal.AudioSource.MIC
             wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LinguaLocal:listen")
@@ -119,6 +122,7 @@ class ListenService : LifecycleService() {
         // Pieces already recorded keep translating after stop (they run in [finishing]); the piece being
         // spoken when stop was tapped is closed and sent by the mic loop on its way out.
         com.example.lingualocal.data.ProjectStore.flush()
+        if (::space.isInitialized) com.example.lingualocal.data.ProjectStore.stopRecording(space)
         super.onDestroy()
     }
 
@@ -126,15 +130,15 @@ class ListenService : LifecycleService() {
         AppState.session = System.currentTimeMillis()
         AppState.running.value = true
         val speaker = Speaker(applicationContext)
-        val translator = SegmentTranslator(applicationContext, finishing, speaker)
+        val translator = SegmentTranslator(applicationContext, finishing, speaker, space)
         // Voice fingerprints for "who is speaking" (on-device, ONNX Runtime). Loads in the background.
         val speakers = async(Dispatchers.Default) {
-            runCatching { SpeakerId(applicationContext) }
+            runCatching { People.model() }
                 .onSuccess { AppState.speakerStatus.value = "Running on-device (ONNX Runtime)" }
                 .onFailure { Log.e(TAG, "speaker model failed", it); AppState.speakerStatus.value = "Failed: ${it.message?.take(80)}" }
                 .getOrNull()
         }
-        val interpreter = LiveInterpreter()
+        val interpreter = LiveInterpreter(space)
         val vad = try {
             withContext(Dispatchers.Default) { SileroVad(applicationContext) }.also {
                 AppState.vadStatus.value = "Running on-device (ONNX Runtime)"
@@ -149,13 +153,13 @@ class ListenService : LifecycleService() {
 
         launch(Dispatchers.IO) { interpreter.run(audioOut) }
         // Push-to-talk falls back to Gemini (per-segment translation) if on-device recognition fails.
-        val pushToTalk = PushToTalk(applicationContext, this, speaker) { id, pcm -> translator.submit(id, pcm) }
+        val pushToTalk = PushToTalk(applicationContext, this, speaker, space) { id, pcm -> translator.submit(id, pcm) }
         // Switching "Speak translations" off cuts any speech that is already playing.
         launch { AppState.speakAloud.collect { if (!it) speaker.stop() } }
         try {
             withContext(Dispatchers.IO) { micLoop(this, vad, translator, speakers, pushToTalk, audioOut) }
         } finally {
-            if (speakers.isCompleted) speakers.getCompleted()?.close() else speakers.cancel()
+            if (!speakers.isCompleted) speakers.cancel() // the model is shared and kept loaded (People)
             pushToTalk.close()
             speaker.close()
             vad?.close()
@@ -244,29 +248,24 @@ class ListenService : LifecycleService() {
             val pcm = segmentAudio.toByteArray()
             if (confirmed) {
                 if (batch.size() > 0) send(AudioChunk(id, batch.toByteArray()))
-                AppState.updateCaption(id) { it.copy(durationMs = now - segmentStart) }
-                translator.submit(id, pcm)
-                val voicedMs = voicedFrames * 32L
-                scope.launch(Dispatchers.Default) {
-                    val who = runCatching { speakers.await()?.identify(pcm, voicedMs) }
-                        .onFailure { Log.w(TAG, "speaker id failed: $it") }.getOrNull()
-                    if (who != null) AppState.updateCaption(id) { it.copy(speaker = who) }
-                }
+                space.updateCaption(id) { it.copy(durationMs = now - segmentStart) }
+                // Who is speaking is matched once the words are back (per turn when two people talk).
+                translator.submit(id, pcm, voicedFrames * 32L)
             } else {
                 // Too little voice (a click, a cough, background noise): never sent to Gemini.
                 Log.d(TAG, "segment #$id skipped on device: only ${voicedFrames * 32} ms of voice")
-                AppState.updateCaption(id) { it.copy(durationMs = now - segmentStart, status = SegmentStatus.SKIPPED) }
+                space.updateCaption(id) { it.copy(durationMs = now - segmentStart, status = SegmentStatus.SKIPPED) }
             }
             batch.reset()
             segmentAudio.reset()
             finishing.launch(Dispatchers.IO) {
-                val path = runCatching { SegmentAudio.save(applicationContext, id, pcm) }.getOrNull()
-                if (path != null) AppState.updateCaption(id) { it.copy(audioFile = path) }
+                val path = runCatching { SegmentAudio.save(space, id, pcm) }.getOrNull()
+                if (path != null) space.updateCaption(id) { it.copy(audioFile = path) }
             }
         }
 
         fun startSegment(now: Long) {
-            segmentId = AppState.newCaption()
+            segmentId = space.newCaption()
             segmentStart = now
             voicedFrames = 0
             confirmed = false
@@ -347,7 +346,7 @@ class ListenService : LifecycleService() {
                     } else if (now - lastDurationUpdate > 250) {
                         val id = segmentId
                         val d = now - segmentStart
-                        AppState.updateCaption(id) { it.copy(durationMs = d) }
+                        space.updateCaption(id) { it.copy(durationMs = d) }
                         lastDurationUpdate = now
                     }
                 } else {
@@ -447,7 +446,7 @@ class ListenService : LifecycleService() {
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentTitle("LinguaLocal is listening")
-            .setContentText(if (phone) "Translating phone audio live" else "Translating ${AppState.pair.label} live")
+            .setContentText(if (phone) "Translating phone audio live" else "Translating ${(if (::space.isInitialized) space else AppState.view.value)?.pair?.label.orEmpty()} live")
             .setOngoing(true)
             .setContentIntent(open)
             .addAction(0, "Stop", stop)

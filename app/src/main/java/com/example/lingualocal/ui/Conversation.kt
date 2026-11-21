@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.DownloadDone
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Info
@@ -57,6 +58,7 @@ import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import kotlinx.coroutines.flow.first
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -98,6 +100,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.lingualocal.audio.People
 import com.example.lingualocal.AppState
 import com.example.lingualocal.Caption
 import com.example.lingualocal.Config
@@ -146,27 +149,81 @@ private const val SILENCE_GAP_MS = 2_000L
 private val ASK_WIDTH = 380.dp
 private val clock = SimpleDateFormat("HH:mm", Locale.getDefault())
 
+/** The project on screen, for the pieces of the conversation screen. */
+private val LocalSpace = androidx.compose.runtime.staticCompositionLocalOf<com.example.lingualocal.ProjectSpace> { error("no project") }
+
 /** Which piece the per-bubble play button started, so only that bubble shows "stop". */
 private var replayingId by mutableStateOf<Long?>(null)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun ConversationScreen(project: Project, nav: Nav, showBack: Boolean) {
-    val running by AppState.running.collectAsStateWithLifecycle()
-    val captions by AppState.captions.collectAsStateWithLifecycle()
+internal fun ConversationScreen(space: com.example.lingualocal.ProjectSpace, nav: Nav, showBack: Boolean) {
+    androidx.compose.runtime.CompositionLocalProvider(LocalSpace provides space) { ConversationContent(space, nav, showBack) }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ConversationContent(space: com.example.lingualocal.ProjectSpace, nav: Nav, showBack: Boolean) {
+    val project by space.project.collectAsStateWithLifecycle()
+    val anyRunning by AppState.running.collectAsStateWithLifecycle()
+    val live by AppState.live.collectAsStateWithLifecycle()
+    // Listening into this project. Listening into another one goes on in the background (bar at the top).
+    val running = anyRunning && live?.id == space.id
+    val elsewhere = live.takeIf { anyRunning && it != null && it.id != space.id }
+    val captions by space.captions.collectAsStateWithLifecycle()
     val playing by PlayAll.current.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     val rows = remember(captions) { timeline(captions) }
     var renaming by remember { mutableStateOf(false) }
     var engines by remember { mutableStateOf(false) }
     var asking by remember { mutableStateOf(false) }
+    // Find & jump (long meetings): search, one person's pieces, or a time.
+    var finding by remember(project.id) { mutableStateOf(false) }
+    var query by remember(project.id) { mutableStateOf("") }
+    var person by remember(project.id) { mutableStateOf<Int?>(null) }
+    var mineOnly by remember(project.id) { mutableStateOf(false) }
+    val clock = remember(captions.size, query) { clockHits(captions, query) }
+    val words = remember(query, clock) { if (clock != null) emptyList() else searchWords(query) }
+    val filtering = finding && (words.isNotEmpty() || person != null || mineOnly)
+    val results = remember(captions, words, person, mineOnly, filtering) {
+        if (filtering) captions.filter { it.status != SegmentStatus.RECORDING && matches(it, words, person, mineOnly) } else emptyList()
+    }
+    val marks = remember(captions.size, finding) { if (finding) timeMarks(captions) else emptyList() }
+    val people = remember(captions.size, finding) { if (finding) peopleIn(captions) else emptyList() }
+    val hasMine = remember(captions.size, finding) { finding && captions.any { it.mine } }
+    val resultsState = rememberLazyListState()
+    /** Piece to bring into view once the whole conversation is showing again. */
+    var jumpTo by remember { mutableStateOf<Long?>(null) }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(project.id) { AskAssistant.forProject(project.id) }
+    LaunchedEffect(project.id) {
+        val total = androidx.compose.runtime.snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it > 0 }
+        listState.scrollToItem(total - 1)
+    }
     if (showBack) BackHandler(onBack = nav::close)
+    if (finding) BackHandler { finding = false }
 
     LaunchedEffect(captions.size) {
-        val last = listState.layoutInfo.totalItemsCount - 1
-        if (captions.isNotEmpty() && last >= 0 && playing == null) listState.animateScrollToItem(last)
+        val total = listState.layoutInfo.totalItemsCount
+        // Follow new pieces only when already at the end, so reading back in a long meeting isn't interrupted.
+        val lastSeen = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+        if (captions.isNotEmpty() && total > 0 && playing == null && !filtering && (lastSeen >= total - 4 || total <= 2)) {
+            listState.animateScrollToItem(total - 1)
+        }
+    }
+    LaunchedEffect(jumpTo, filtering) {
+        val id = jumpTo ?: return@LaunchedEffect
+        if (filtering) return@LaunchedEffect
+        val i = rows.indexOfFirst { it is TimelineRow.Piece && it.caption.id == id }
+        if (i >= 0) listState.scrollToItem((i - 1).coerceAtLeast(0))
+        jumpTo = null
+    }
+    fun jump(m: TimeMark) {
+        val i = if (m.time == Long.MAX_VALUE) rows.lastIndex else {
+            rows.indexOfFirst { (it is TimelineRow.Piece && it.caption.time >= m.time) || (m.session && it is TimelineRow.Session && it.start == m.time) }
+        }
+        if (i >= 0) scope.launch { listState.scrollToItem(if (m.session) i else (i - 1).coerceAtLeast(0)) }
     }
     // Play all: keep the piece being played on screen.
     LaunchedEffect(playing) {
@@ -180,8 +237,26 @@ internal fun ConversationScreen(project: Project, nav: Nav, showBack: Boolean) {
         val wide = (if (asking && askSide) maxWidth - ASK_WIDTH else maxWidth) >= 640.dp
         Row(Modifier.fillMaxSize()) {
         Column(Modifier.weight(1f).fillMaxSize()) {
-            ConversationHeader(project, running, showBack, nav, onRename = { renaming = true }, onEngines = { engines = true }, captions = captions, playing = playing != null, asking = asking, onAsk = { asking = !asking })
+            if (elsewhere != null) RecordingElsewhere(elsewhere) { nav.open(elsewhere.project.value) }
+            ConversationHeader(project, running, showBack, nav, onRename = { renaming = true }, onEngines = { engines = true }, captions = captions, playing = playing != null, asking = asking, onAsk = { asking = !asking }, finding = finding, onFind = { finding = !finding })
+            if (finding) FindBar(
+                query = query, onQuery = { query = it },
+                person = person, onPerson = { person = it },
+                mine = mineOnly, onMine = { mineOnly = it },
+                people = people, hasMine = hasMine,
+                marks = marks, onJump = ::jump,
+                results = if (filtering) results.size else null,
+                onClose = { finding = false },
+                clock = clock,
+                onClockGo = { hit -> finding = false; jumpTo = pieceAt(captions, hit.time)?.id },
+                onClockPlay = { hit ->
+                    val p = pieceAt(captions, hit.time)
+                    finding = false
+                    if (p != null) { jumpTo = p.id; PlayAll.start(captions, fromId = p.id) }
+                },
+            )
             BufferBanner()
+            BatteryBanner(running)
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
                 LazyColumn(
                     state = listState,
@@ -198,9 +273,23 @@ internal fun ConversationScreen(project: Project, nav: Nav, showBack: Boolean) {
                         }
                     }
                 }
+                if (filtering) Box(Modifier.fillMaxSize().background(LL.Bg), contentAlignment = Alignment.TopCenter) { LazyColumn(
+                    state = resultsState,
+                    modifier = Modifier.widthIn(max = 860.dp).fillMaxSize(),
+                    contentPadding = PaddingValues(horizontal = if (wide) 24.dp else 12.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    items(results, key = { it.id }) { c ->
+                        Column {
+                            GoToRow(c.time) { jumpTo = c.id; finding = false }
+                            Bubble(c, playing = c.id == playing, wide = wide)
+                        }
+                    }
+                } }
             }
+            if (!filtering) LatestButton(listState, rows.size)
             if (playing != null) PlayerBar(captions, wide)
-            InputBar(running, nav.toggleListening, wide)
+            InputBar(running, nav::toggleListening, wide)
         }
         if (asking && askSide) {
             Box(Modifier.width(1.dp).fillMaxSize().background(LL.Line))
@@ -237,6 +326,7 @@ private fun ConversationHeader(
     project: Project, running: Boolean, showBack: Boolean, nav: Nav,
     onRename: () -> Unit, onEngines: () -> Unit,
     captions: List<Caption>, playing: Boolean, asking: Boolean, onAsk: () -> Unit,
+    finding: Boolean, onFind: () -> Unit,
 ) {
     val playable = captions.count { it.done && (it.heard.isNotBlank() || it.turns.isNotEmpty()) }
     Column {
@@ -255,6 +345,8 @@ private fun ConversationHeader(
                     Text(if (running) "Listening · ${elapsed(running)}" else "Not listening", color = if (running) LL.Muted else LL.Faint, fontSize = 12.sp)
                 }
             }
+            HeaderIcon(androidx.compose.material.icons.Icons.Outlined.Search, "Find and jump to a time", active = finding, onClick = onFind)
+            Spacer(Modifier.width(8.dp))
             HeaderIcon(Icons.Outlined.Tune, "Engines and diagnostics", onClick = onEngines)
             Spacer(Modifier.width(8.dp))
             PairSwitch(project)
@@ -327,6 +419,28 @@ private fun HeaderIcon(icon: ImageVector, label: String, active: Boolean = false
     ) { Icon(icon, contentDescription = label, tint = if (active) LL.English else LL.Muted, modifier = Modifier.size(20.dp)) }
 }
 
+/** Listening goes on in another project while this one is open: where, for how long, and the way back. */
+@Composable
+private fun RecordingElsewhere(live: com.example.lingualocal.ProjectSpace, onGoBack: () -> Unit) {
+    val p by live.project.collectAsStateWithLifecycle()
+    val name = if (p.name.startsWith("Untitled · ")) "Untitled" else p.name
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().background(LL.Surface).clickable(onClick = onGoBack)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Box(Modifier.size(8.dp).clip(CircleShape).background(LL.Live))
+        Spacer(Modifier.width(10.dp))
+        Text(
+            "Recording in $name · ${elapsed(true)}", color = LL.Text, fontSize = 14.sp,
+            maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(12.dp))
+        Text("Go back", color = LL.English, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    }
+    Box(Modifier.fillMaxWidth().height(1.dp).background(LL.Line))
+}
+
 /** mm:ss since the current listening session started, ticking once a second. */
 @Composable
 private fun elapsed(running: Boolean): String {
@@ -343,7 +457,7 @@ private fun elapsed(running: Boolean): String {
 /** Speech saved while Gemini is unreachable, so nothing disappears silently. */
 @Composable
 private fun BufferBanner() {
-    val captions by AppState.captions.collectAsStateWithLifecycle()
+    val captions by LocalSpace.current.captions.collectAsStateWithLifecycle()
     val buffered by AppState.bufferedBytes.collectAsStateWithLifecycle()
     val live by AppState.liveStatus.collectAsStateWithLifecycle()
     val waiting = captions.count { it.status == SegmentStatus.QUEUED || it.status == SegmentStatus.TRANSLATING }
@@ -363,13 +477,81 @@ private fun BufferBanner() {
     }
 }
 
+/** The piece being spoken at [time], or the first one after it. */
+private fun pieceAt(captions: List<Caption>, time: Long): Caption? =
+    captions.lastOrNull { it.time <= time && time < it.time + it.durationMs + 1_000 } ?: captions.firstOrNull { it.time >= time }
+
+/** Shown when reading back in a long conversation: one tap back to the newest piece. */
+@Composable
+private fun LatestButton(state: androidx.compose.foundation.lazy.LazyListState, total: Int) {
+    val behind by remember(total) {
+        androidx.compose.runtime.derivedStateOf {
+            val last = state.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf false
+            total > 0 && last < total - 3
+        }
+    }
+    if (!behind) return
+    val scope = rememberCoroutineScope()
+    Box(Modifier.fillMaxWidth().padding(vertical = 6.dp), contentAlignment = Alignment.Center) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.height(36.dp).clip(RoundedCornerShape(18.dp)).background(LL.Raised)
+                .border(1.dp, LL.LineStrong, RoundedCornerShape(18.dp))
+                .clickable { scope.launch { state.scrollToItem(total - 1) } }.padding(horizontal = 14.dp),
+        ) {
+            Text("↓  Latest", color = LL.Text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        }
+    }
+}
+
+/** Hidden for the rest of the app run once dismissed. */
+private var batteryHintDismissed by mutableStateOf(false)
+
+/**
+ * While listening: if the system may stop the app in the background (battery saver; Xiaomi is strict),
+ * offers to turn that off so a long meeting isn't cut. Shown until allowed or dismissed.
+ */
+@Composable
+private fun BatteryBanner(running: Boolean) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val pm = remember { context.getSystemService(android.os.PowerManager::class.java) }
+    var allowed by remember { mutableStateOf(true) }
+    androidx.lifecycle.compose.LifecycleResumeEffect(running) {
+        allowed = pm?.isIgnoringBatteryOptimizations(context.packageName) != false
+        onPauseOrDispose { }
+    }
+    if (!running || allowed || batteryHintDismissed) return
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().background(LL.Thai.copy(alpha = 0.10f)).padding(start = 20.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+    ) {
+        Icon(Icons.Outlined.Info, contentDescription = null, tint = LL.Thai, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(
+            "For long meetings, let LinguaLocal run without battery limits so the phone doesn't stop it.",
+            color = LL.Thai, fontSize = 13.sp, modifier = Modifier.weight(1f),
+        )
+        androidx.compose.material3.TextButton(onClick = {
+            runCatching {
+                context.startActivity(android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            }.onFailure {
+                context.startActivity(
+                    android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                        .setData(android.net.Uri.parse("package:" + context.packageName))
+                )
+            }
+        }) { Text("Allow", color = LL.Thai, fontWeight = FontWeight.SemiBold) }
+        androidx.compose.material3.TextButton(onClick = { batteryHintDismissed = true }) { Text("Not now", color = LL.Muted) }
+    }
+}
+
 @Composable
 private fun EmptyTranscript(running: Boolean) {
     Column(Modifier.fillMaxWidth().padding(top = 64.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         LogoMark(56.dp)
         Spacer(Modifier.height(12.dp))
         Text(
-            if (running) "Listening… speak ${AppState.pair.label.replace(" ⇄ ", " or ")} nearby." else "Tap listen, or type below.",
+            if (running) "Listening… speak ${LocalSpace.current.pair.label.replace(" ⇄ ", " or ")} nearby." else "Tap listen, or type below.",
             color = LL.Text, fontSize = 16.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(4.dp))
@@ -387,7 +569,10 @@ private fun SessionDivider(row: TimelineRow.Session) {
         Spacer(Modifier.width(12.dp))
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("Session ${row.number}", color = LL.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-            Text("${dayLabel(row.start)} · ${duration(end - row.start)}", color = LL.Muted, fontSize = 12.sp)
+            Text(
+                "${dayLabel(row.start)} – ${java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(end))} · ${duration(end - row.start)}",
+                color = LL.Muted, fontSize = 12.sp,
+            )
         }
         Spacer(Modifier.width(10.dp))
         Row(
@@ -468,10 +653,14 @@ private fun Bubble(caption: Caption, playing: Boolean, wide: Boolean) {
 
 @Composable
 private fun BubbleHeader(caption: Caption, heardLang: String) {
+    val names by People.names.collectAsStateWithLifecycle()
+    var renaming by remember { mutableStateOf(false) }
+    val person = caption.speaker.takeIf { !caption.mine }
+    if (renaming && person != null) PersonDialog(person) { renaming = false }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 4.dp)) {
         val (avatar, color) = when {
             caption.mine -> "" to LL.English
-            caption.speaker != null -> "${caption.speaker}" to LL.Thai
+            person != null -> (names[person]?.takeIf { it.isNotBlank() }?.take(1)?.uppercase() ?: "$person") to LL.Thai
             else -> "•" to LL.Muted
         }
         Box(Modifier.size(28.dp).clip(CircleShape).background(LL.Raised), contentAlignment = Alignment.Center) {
@@ -481,22 +670,46 @@ private fun BubbleHeader(caption: Caption, heardLang: String) {
         }
         Spacer(Modifier.width(8.dp))
         Text(
-            when { caption.mine -> "You"; caption.speaker != null -> "Voice ${caption.speaker}"; else -> "Voice" },
+            when { caption.mine -> "You"; person != null -> People.label(person, names); else -> "Voice" },
             color = LL.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            // Tap a person to give them a name; it shows on all their cards in this project.
+            modifier = if (person != null) Modifier.clickable { renaming = true } else Modifier,
         )
         Spacer(Modifier.width(8.dp))
         Text(clock.format(Date(caption.time)), color = LL.Faint, fontSize = 12.sp)
         if (heardLang.isNotBlank()) {
             Spacer(Modifier.width(8.dp))
             LangPill(heardLang, Lang.target(heardLang, caption.translation.ifBlank { caption.turns.firstOrNull()?.translation.orEmpty() })
-                .takeIf { caption.done } ?: Lang.other(heardLang, AppState.pair))
+                .takeIf { caption.done } ?: Lang.other(heardLang, LocalSpace.current.pair))
         }
     }
 }
 
+/** Who said this turn: the project's person (tap to name them), or Gemini's A/B when not matched by voice. */
+@Composable
+private fun TurnLabel(t: com.example.lingualocal.Turn) {
+    val names by People.names.collectAsStateWithLifecycle()
+    var renaming by remember { mutableStateOf(false) }
+    val p = t.person
+    Text(
+        if (p != null) People.label(p, names) else t.speaker,
+        color = LL.Thai, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+        modifier = if (p != null) Modifier.clickable { renaming = true } else Modifier,
+    )
+    if (renaming && p != null) PersonDialog(p) { renaming = false }
+}
+
+@Composable
+private fun PersonDialog(n: Int, onDismiss: () -> Unit) {
+    NameDialog(
+        "Name ${People.label(n)}", People.names.value[n].orEmpty(), onDismiss,
+        placeholder = "e.g. Khun Somchai", hint = "Shown on all of this person's cards in this project",
+    ) { People.rename(n, it); onDismiss() }
+}
+
 /** Reads [text] (a translation) aloud in its language. Tap again to stop. */
 @Composable
-private fun SayButton(text: String, key: String, label: Boolean = true) {
+private fun SayButton(text: String, key: String, label: Boolean = true, saved: Boolean = false) {
     val saying by PlayAll.saying.collectAsStateWithLifecycle()
     val on = saying == key
     val lang = Lang.of(text)
@@ -513,6 +726,10 @@ private fun SayButton(text: String, key: String, label: Boolean = true) {
         if (label) {
             Spacer(Modifier.width(4.dp))
             Text(lang.uppercase(), color = LL.lang(lang), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        }
+        if (saved && !on) {
+            Spacer(Modifier.width(4.dp))
+            Icon(Icons.Outlined.DownloadDone, contentDescription = "Voice saved, plays offline", tint = LL.Faint, modifier = Modifier.size(14.dp))
         }
     }
 }
@@ -531,6 +748,7 @@ private fun LangPill(from: String, to: String) {
 
 @Composable
 private fun BubbleBody(caption: Caption, heardLang: String, playing: Boolean) {
+    val space = LocalSpace.current
     val scope = rememberCoroutineScope()
     var explaining by remember { mutableStateOf(false) }
 
@@ -538,8 +756,8 @@ private fun BubbleBody(caption: Caption, heardLang: String, playing: Boolean) {
         // More than one voice inside this piece: who said what (A, B are per piece).
         caption.turns.forEachIndexed { i, t ->
             if (i > 0) Spacer(Modifier.height(10.dp))
-            Row {
-                Text(t.speaker, color = LL.Thai, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(22.dp))
+            Column {
+                TurnLabel(t)
                 Column {
                     Text(t.heard.trim(), color = LL.Muted, fontSize = 15.sp, lineHeight = 22.sp)
                     if (t.translation.isNotBlank()) Text(t.translation.trim(), color = LL.Text, fontSize = 18.sp, fontWeight = FontWeight.Medium, lineHeight = 26.sp)
@@ -596,7 +814,7 @@ private fun BubbleBody(caption: Caption, heardLang: String, playing: Boolean) {
         val spoken = if (caption.turns.isNotEmpty()) caption.turns.joinToString(" ") { it.translation }.trim() else caption.translation.trim()
         if (caption.done && spoken.isNotBlank()) {
             Spacer(Modifier.width(10.dp))
-            SayButton(spoken, caption.id.toString())
+            SayButton(spoken, caption.id.toString(), saved = com.example.lingualocal.audio.TranslationVoice.saved(caption, spoken) != null)
         }
         if (caption.done && caption.explanation == null && caption.translation.isNotBlank()) {
             Spacer(Modifier.width(10.dp))
@@ -607,7 +825,7 @@ private fun BubbleBody(caption: Caption, heardLang: String, playing: Boolean) {
                     explaining = true
                     scope.launch {
                         val answer = runCatching { HybridAssistant.explain(caption.heard, caption.translation) }
-                        AppState.updateCaption(caption.id) {
+                        space.updateCaption(caption.id) {
                             answer.fold(
                                 { a -> it.copy(explanation = a.text, explainSource = a.source) },
                                 { e -> it.copy(explanation = "Couldn't explain: ${e.message?.take(100)}", explainSource = "") },
@@ -793,8 +1011,8 @@ private fun WaveBars(running: Boolean, modifier: Modifier) {
 private fun statusLine(running: Boolean): String {
     val held by AppState.pushToTalk.collectAsStateWithLifecycle()
     val ptt by AppState.pushToTalkStatus.collectAsStateWithLifecycle()
-    val project by AppState.currentProject.collectAsStateWithLifecycle()
-    val pair = com.example.lingualocal.data.LangPair.of(project?.pair)
+    val project by LocalSpace.current.project.collectAsStateWithLifecycle()
+    val pair = com.example.lingualocal.data.LangPair.of(project.pair)
     return when {
         held && pair != com.example.lingualocal.data.LangPair.TH_EN -> "Speak now… release to translate"
         held -> ptt.ifBlank { "Speak English now… release to translate" }
@@ -821,6 +1039,7 @@ private fun Modifier.holdToSpeak(running: Boolean) = pointerInput(running) {
  */
 @Composable
 private fun InputBar(running: Boolean, onToggle: () -> Unit, wide: Boolean) {
+    val space = LocalSpace.current
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
     val held by AppState.pushToTalk.collectAsStateWithLifecycle()
@@ -829,7 +1048,7 @@ private fun InputBar(running: Boolean, onToggle: () -> Unit, wide: Boolean) {
     var text by remember { mutableStateOf("") }
     val send = {
         val input = text.trim()
-        if (input.isNotBlank()) { text = ""; sendTyped(input, scope) }
+        if (input.isNotBlank()) { text = ""; sendTyped(space, input, scope) }
     }
     val canHold = running && source != com.example.lingualocal.AudioSource.PHONE
     val status = statusLine(running)
@@ -950,22 +1169,23 @@ private fun SourceToggle(running: Boolean, toggle: () -> Unit) {
 }
 
 /** A typed message becomes a piece of the project ("You"), translated and saved like spoken ones. */
-private fun sendTyped(input: String, scope: kotlinx.coroutines.CoroutineScope) {
-    val pair = AppState.pair
-    val id = AppState.newCaption(mine = true)
-    // Not listening: keep typed pieces in the latest session instead of starting one per message.
-    val lastSession = AppState.captions.value.lastOrNull { it.id != id }?.session
-    AppState.updateCaption(id) {
+private fun sendTyped(space: com.example.lingualocal.ProjectSpace, input: String, scope: kotlinx.coroutines.CoroutineScope) {
+    val pair = space.pair
+    val listeningHere = AppState.liveId() == space.id
+    val id = space.newCaption(mine = true, source = com.example.lingualocal.Caption.SOURCE_TYPED)
+    // Not listening here: keep typed pieces in the latest session instead of starting one per message.
+    val lastSession = space.captions.value.lastOrNull { it.id != id }?.session
+    space.updateCaption(id) {
         it.copy(
             heard = input, lang = Lang.of(input), status = SegmentStatus.TRANSLATING,
-            session = if (AppState.session > 0 || lastSession == null) it.session else lastSession,
+            session = if (listeningHere || lastSession == null) it.session else lastSession,
         )
     }
     scope.launch(kotlinx.coroutines.NonCancellable) {
         runCatching {
             if (pair.worksOffline) OfflineTranslator.translate(input) else com.example.lingualocal.ai.CloudText.translate(input, pair)
         }.onSuccess { t ->
-            AppState.updateCaption(id) {
+            space.updateCaption(id) {
                 it.copy(
                     translation = t.trim(), status = SegmentStatus.DONE, note = null, offline = pair.worksOffline,
                     engine = if (pair.worksOffline) Lang.DEVICE_ENGINE else Lang.cloudEngine(Config.CLOUD_TEXT_MODEL),
@@ -973,7 +1193,7 @@ private fun sendTyped(input: String, scope: kotlinx.coroutines.CoroutineScope) {
             }
             if (AppState.speakAloud.value) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { PlayAll.say(t.trim(), id.toString()) }
         }.onFailure { e ->
-            AppState.updateCaption(id) {
+            space.updateCaption(id) {
                 it.copy(status = SegmentStatus.QUEUED, note = if (pair.worksOffline) "Offline translation failed: ${e.message?.take(60)}" else "Couldn't translate (needs internet)")
             }
         }
@@ -995,7 +1215,7 @@ private fun EnginePanel() {
     val speech by AppState.speechActive.collectAsStateWithLifecycle()
     val echo by AppState.echoGuard.collectAsStateWithLifecycle()
     val running by AppState.running.collectAsStateWithLifecycle()
-    val captions by AppState.captions.collectAsStateWithLifecycle()
+    val captions by LocalSpace.current.captions.collectAsStateWithLifecycle()
     val gain by AppState.inputGain.collectAsStateWithLifecycle()
     val animProb by animateFloatAsState(prob, label = "vad")
 

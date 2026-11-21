@@ -5,7 +5,11 @@ object Config {
     const val LIVE_MODEL = "gemini-3.1-flash-live-preview"
 
     /** Cloud model the hybrid SDK falls back to when Gemini Nano isn't available on the device. */
-    const val CLOUD_TEXT_MODEL = "gemini-3.8-flash"
+    const val CLOUD_TEXT_MODEL = "gemini-4-hydrogen"
+
+    /** Gemini's speech model: reads translations aloud for languages the phone has no voice for (Burmese). */
+    const val TTS_MODEL = "gemini-3.8-flash-tts"
+    const val TTS_VOICE = "Puck"
 
     const val MIC_SAMPLE_RATE = 16_000
     const val SPEAKER_SAMPLE_RATE = 24_000

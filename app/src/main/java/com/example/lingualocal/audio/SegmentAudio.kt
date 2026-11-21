@@ -23,8 +23,8 @@ object SegmentAudio {
         path?.let { File(it).delete() }
     }
 
-    fun save(context: Context, id: Long, pcm: ByteArray): String {
-        val dir = ProjectStore.audioDir(context)
+    fun save(space: com.example.lingualocal.ProjectSpace, id: Long, pcm: ByteArray): String {
+        val dir = ProjectStore.audioDir(space)
         val m4a = File(dir, "segment_$id.m4a")
         runCatching { AacEncoder.encode(pcm, Config.MIC_SAMPLE_RATE, m4a) }
             .onSuccess { return m4a.absolutePath }
@@ -40,7 +40,7 @@ object SegmentAudio {
     /** A complete in-memory WAV file of 16 kHz PCM16, for sending to Gemini. */
     fun wav(pcm: ByteArray): ByteArray = wavHeader(pcm.size, Config.MIC_SAMPLE_RATE) + pcm
 
-    private fun wavHeader(dataSize: Int, rate: Int): ByteArray =
+    fun wavHeader(dataSize: Int, rate: Int): ByteArray =
         ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN).apply {
             put("RIFF".toByteArray()); putInt(36 + dataSize); put("WAVE".toByteArray())
             put("fmt ".toByteArray()); putInt(16); putShort(1); putShort(1) // PCM, mono

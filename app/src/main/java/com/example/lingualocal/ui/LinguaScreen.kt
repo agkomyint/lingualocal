@@ -88,7 +88,7 @@ import java.util.Locale
  */
 @Composable
 fun LinguaScreen(onToggleListening: () -> Unit) {
-    val project by AppState.currentProject.collectAsStateWithLifecycle()
+    val view by AppState.view.collectAsStateWithLifecycle()
     val dialogs = remember { ProjectDialogs() }
     val scope = rememberCoroutineScope()
     val nav = remember(onToggleListening, scope) { Nav(onToggleListening, scope) }
@@ -97,50 +97,66 @@ fun LinguaScreen(onToggleListening: () -> Unit) {
         val sidebar = maxWidth >= 1200.dp || (maxWidth >= 840.dp && maxWidth > maxHeight)
         if (sidebar) {
             Row(Modifier.fillMaxSize()) {
-                Sidebar(project, nav, dialogs, Modifier.width(300.dp).fillMaxHeight())
+                Sidebar(view?.id, nav, dialogs, Modifier.width(300.dp).fillMaxHeight())
                 Box(Modifier.width(1.dp).fillMaxHeight().background(LL.Line))
                 Box(Modifier.weight(1f).fillMaxHeight()) {
-                    val p = project
-                    if (p == null) EmptyConversation(nav) else ConversationScreen(p, nav, showBack = false)
+                    val s = view
+                    if (s == null) EmptyConversation(nav) else ConversationScreen(s, nav, showBack = false)
                 }
             }
         } else {
-            val p = project
-            if (p == null) ProjectsHome(nav, dialogs) else ConversationScreen(p, nav, showBack = true)
+            val s = view
+            if (s == null) ProjectsHome(nav, dialogs) else ConversationScreen(s, nav, showBack = true)
         }
     }
     ProjectDialogsHost(dialogs, nav)
 }
 
-/** Moving between projects: listening stops in the project you leave and it is saved. */
-internal class Nav(val toggleListening: () -> Unit, private val scope: CoroutineScope) {
-    private fun leaveCurrent() {
-        if (AppState.running.value) toggleListening()
+/**
+ * Moving between projects. Listening keeps recording into its own project while the user looks at,
+ * plays or asks about others; only the mic button or Quick start ends or moves a session.
+ */
+internal class Nav(private val startStop: () -> Unit, private val scope: CoroutineScope) {
+    /** Playback belongs to the project on screen. */
+    private fun leaveView() {
         PlayAll.stop()
         SegmentAudio.stop()
     }
 
     fun open(p: Project) {
-        if (AppState.currentProject.value?.id == p.id) return
-        leaveCurrent()
+        if (AppState.view.value?.id == p.id) return
+        leaveView()
         ProjectStore.open(p)
     }
 
     fun close() {
-        leaveCurrent()
+        leaveView()
         ProjectStore.close()
+    }
+
+    /** The mic button of the project on screen: stops listening here, or starts here (ending a session in another project first). */
+    fun toggleListening() {
+        val here = AppState.view.value?.id ?: return
+        if (AppState.liveId() == here) { startStop(); return }
+        scope.launch {
+            if (AppState.running.value) {
+                startStop()
+                withTimeoutOrNull(3_000) { AppState.running.first { !it } }
+            }
+            if (!AppState.running.value && AppState.view.value?.id == here) startStop()
+        }
+    }
+
+    /** Stops listening wherever it is. */
+    fun stopListening() {
+        if (AppState.running.value) startStop()
     }
 
     /** One tap: a new project named by date, already listening. */
     fun quickStart() {
-        val wasRunning = AppState.running.value
-        leaveCurrent()
+        leaveView()
         ProjectStore.open(ProjectStore.create(null))
-        scope.launch {
-            // Wait for the old session to stop before starting the new one.
-            if (wasRunning) withTimeoutOrNull(3_000) { AppState.running.first { !it } }
-            if (!AppState.running.value) toggleListening()
-        }
+        toggleListening()
     }
 }
 
@@ -170,7 +186,9 @@ private fun ProjectDialogsHost(d: ProjectDialogs, nav: Nav) {
             text = { Text("All ${p.items} recordings and translations in this project are deleted from this device. This can’t be undone.", color = LL.Muted) },
             confirmButton = {
                 TextButton(onClick = {
-                    if (AppState.currentProject.value?.id == p.id) nav.close()
+                    // Listening in it stops first; listening in another project carries on.
+                    if (AppState.liveId() == p.id) nav.stopListening()
+                    if (AppState.view.value?.id == p.id) nav.close()
                     ProjectStore.delete(p)
                     d.deleting = null
                 }) { Text("Delete", color = LL.Danger) }
@@ -181,7 +199,11 @@ private fun ProjectDialogsHost(d: ProjectDialogs, nav: Nav) {
 }
 
 @Composable
-internal fun NameDialog(title: String, initial: String, onDismiss: () -> Unit, onDone: (String) -> Unit) {
+internal fun NameDialog(
+    title: String, initial: String, onDismiss: () -> Unit,
+    placeholder: String = "e.g. Landlord · lease renewal", hint: String = "Leave blank to name it by date",
+    onDone: (String) -> Unit,
+) {
     var name by remember { mutableStateOf(initial) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -190,8 +212,8 @@ internal fun NameDialog(title: String, initial: String, onDismiss: () -> Unit, o
         text = {
             OutlinedTextField(
                 value = name, onValueChange = { name = it }, singleLine = true,
-                placeholder = { Text("e.g. Landlord · lease renewal", color = LL.Faint) },
-                supportingText = { Text("Leave blank to name it by date", color = LL.Faint) },
+                placeholder = { Text(placeholder, color = LL.Faint) },
+                supportingText = { Text(hint, color = LL.Faint) },
                 colors = fieldColors(),
                 shape = RoundedCornerShape(14.dp),
             )
@@ -354,13 +376,14 @@ private fun SearchField(query: String, onChange: (String) -> Unit) {
 // ---------- Sidebar (tablet landscape) ----------
 
 @Composable
-private fun Sidebar(current: Project?, nav: Nav, dialogs: ProjectDialogs, modifier: Modifier) {
+private fun Sidebar(currentId: String?, nav: Nav, dialogs: ProjectDialogs, modifier: Modifier) {
     val projects by AppState.projects.collectAsStateWithLifecycle()
     val running by AppState.running.collectAsStateWithLifecycle()
+    val live by AppState.live.collectAsStateWithLifecycle()
     var query by remember { mutableStateOf("") }
     var settings by remember { mutableStateOf(false) }
     val shown = projects.filter { query.isBlank() || it.name.contains(query.trim(), ignoreCase = true) }
-    val groups = shown.groupBy { ageGroup(it.lastUsed) }
+    val groups = shown.groupBy { ageGroup(it.created) }
     if (settings) SettingsDialog { settings = false }
 
     Column(modifier.background(LL.Side).padding(start = 14.dp, end = 14.dp, top = 16.dp, bottom = 14.dp)) {
@@ -393,8 +416,8 @@ private fun Sidebar(current: Project?, nav: Nav, dialogs: ProjectDialogs, modifi
             groups.forEach { (label, list) ->
                 item(key = "h-$label") { SectionLabel(label, Modifier.padding(start = 8.dp, top = 10.dp, bottom = 4.dp)) }
                 items(list, key = { it.id }) { p ->
-                    val sel = p.id == current?.id
-                    SideRow(p, selected = sel, live = sel && running, onOpen = { nav.open(p) }, dialogs = dialogs)
+                    val sel = p.id == currentId
+                    SideRow(p, selected = sel, live = running && p.id == live?.id, onOpen = { nav.open(p) }, dialogs = dialogs)
                 }
             }
             if (shown.isEmpty()) item {
@@ -402,6 +425,12 @@ private fun Sidebar(current: Project?, nav: Nav, dialogs: ProjectDialogs, modifi
             }
         }
     }
+}
+
+/** Recorded length: 04:12, or 1:04:12 past an hour. */
+private fun length(ms: Long): String {
+    val s = ms / 1000
+    return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60) else "%02d:%02d".format(s / 60, s % 60)
 }
 
 /** A sidebar project: title, date and time underneath, length on the right. Long-press to rename or delete. */
@@ -432,9 +461,9 @@ private fun SideRow(p: Project, selected: Boolean, live: Boolean, onOpen: () -> 
                     Box(Modifier.size(7.dp).clip(CircleShape).background(LL.Live))
                     Spacer(Modifier.width(6.dp))
                     Text("Live", color = LL.Live, fontSize = 12.sp)
+                    if (p.totalMs > 0) Text(" · ${length(p.totalMs)}", color = LL.Faint, fontSize = 12.sp)
                 } else if (p.totalMs > 0) {
-                    val sec = p.totalMs / 1000
-                    Text("%02d:%02d".format(sec / 60, sec % 60), color = LL.Faint, fontSize = 12.sp)
+                    Text(length(p.totalMs), color = LL.Faint, fontSize = 12.sp)
                 }
             }
         }

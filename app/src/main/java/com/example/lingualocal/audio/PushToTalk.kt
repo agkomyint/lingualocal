@@ -37,6 +37,8 @@ class PushToTalk(
     private val context: Context,
     private val scope: CoroutineScope,
     private val speaker: Speaker,
+    /** The project being recorded. */
+    private val space: com.example.lingualocal.ProjectSpace,
     /** Sends a finished recording to Gemini (fallback). */
     private val toGemini: (id: Long, pcm: ByteArray) -> Unit,
 ) {
@@ -86,9 +88,9 @@ class PushToTalk(
     /** Button pressed: start a new "You" card and start recognizing. Called from the mic thread. */
     fun start() {
         speaker.stop()
-        val id = AppState.newCaption(mine = true)
+        val id = space.newCaption(mine = true, source = com.example.lingualocal.Caption.SOURCE_MIC)
         // On-device recognition is English only; other pairs go straight to Gemini on release.
-        if (!available || AppState.pair != com.example.lingualocal.data.LangPair.TH_EN) {
+        if (!available || space.pair != com.example.lingualocal.data.LangPair.TH_EN) {
             take = Take(id, null, null)
             return
         }
@@ -135,9 +137,9 @@ class PushToTalk(
             t.english.collectLatest { en ->
                 if (en.isBlank()) return@collectLatest
                 t.gotText = true
-                AppState.updateCaption(id) { it.copy(heard = en) }
+                space.updateCaption(id) { it.copy(heard = en) }
                 val th = runCatching { OfflineTranslator.translate(en) }.getOrNull() ?: return@collectLatest
-                AppState.updateCaption(id) { it.copy(translation = th) }
+                space.updateCaption(id) { it.copy(translation = th) }
             }
         }
     }
@@ -149,7 +151,7 @@ class PushToTalk(
         t.writes.trySend(bytes)
         if (t.pcm.size() % (32_000) < bytes.size) {
             val ms = t.pcm.size() / 32L
-            AppState.updateCaption(t.id) { it.copy(durationMs = ms) }
+            space.updateCaption(t.id) { it.copy(durationMs = ms) }
         }
     }
 
@@ -158,11 +160,11 @@ class PushToTalk(
         val t = take ?: return
         take = null
         val pcm = t.pcm.toByteArray()
-        AppState.updateCaption(t.id) { it.copy(durationMs = pcm.size / 32L, status = SegmentStatus.TRANSLATING) }
+        space.updateCaption(t.id) { it.copy(durationMs = pcm.size / 32L, status = SegmentStatus.TRANSLATING) }
         t.writes.close() // closes the pipe -> recognizer finishes the last words
         scope.launch(Dispatchers.IO) {
-            runCatching { SegmentAudio.save(context.applicationContext, t.id, pcm) }
-                .getOrNull()?.let { path -> AppState.updateCaption(t.id) { it.copy(audioFile = path) } }
+            runCatching { SegmentAudio.save(space, t.id, pcm) }
+                .getOrNull()?.let { path -> space.updateCaption(t.id) { it.copy(audioFile = path) } }
         }
         scope.launch(Dispatchers.IO) {
             withTimeoutOrNull(5_000) { t.recognition?.join() }
@@ -171,21 +173,21 @@ class PushToTalk(
             if (t.source == null || (en.isBlank() && (t.failed || pcm.size > 16_000))) {
                 // Nothing recognized on-device: let Gemini translate the recording.
                 Log.d(TAG, "push-to-talk #${t.id}: sending to Gemini (on-device text=\"$en\")")
-                AppState.updateCaption(t.id) { it.copy(status = SegmentStatus.QUEUED) }
+                space.updateCaption(t.id) { it.copy(status = SegmentStatus.QUEUED) }
                 toGemini(t.id, pcm)
                 return@launch
             }
             if (en.isBlank()) {
-                AppState.updateCaption(t.id) { it.copy(status = SegmentStatus.NO_SPEECH) }
+                space.updateCaption(t.id) { it.copy(status = SegmentStatus.NO_SPEECH) }
                 return@launch
             }
             val th = runCatching { OfflineTranslator.translate(en) }.getOrElse {
                 Log.w(TAG, "translation failed", it)
-                AppState.updateCaption(t.id) { c -> c.copy(status = SegmentStatus.QUEUED) }
+                space.updateCaption(t.id) { c -> c.copy(status = SegmentStatus.QUEUED) }
                 toGemini(t.id, pcm)
                 return@launch
             }
-            AppState.updateCaption(t.id) {
+            space.updateCaption(t.id) {
                 it.copy(heard = en, translation = th, status = SegmentStatus.DONE, lang = Lang.EN, engine = Lang.DEVICE_ENGINE)
             }
             Log.d(TAG, "push-to-talk #${t.id}: \"$en\" -> \"$th\"")

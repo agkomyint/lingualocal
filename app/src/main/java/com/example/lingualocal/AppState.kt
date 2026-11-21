@@ -36,6 +36,8 @@ data class Turn(
     val translation: String,
     /** Language this person spoke, "th" or "en" (see data.Lang). */
     val lang: String = "",
+    /** Who this is in the whole project (People), matched by voice on the device. Null = not matched. */
+    val person: Int? = null,
 )
 
 /** One speech segment (cut by the on-device voice detector) and its live translation. */
@@ -71,7 +73,18 @@ data class Caption(
     val engine: String = "",
     /** Earlier versions, oldest first (append-only). */
     val revisions: List<Revision> = emptyList(),
+    /** Where this piece came from: [SOURCE_MIC], [SOURCE_PHONE] (other apps, e.g. YouTube) or [SOURCE_TYPED]. Empty = saved before this was recorded. */
+    val source: String = "",
+    /** The translation spoken aloud, saved so it plays offline (WAV), and the text it was made from. */
+    val voiceFile: String? = null,
+    val voiceText: String = "",
 ) {
+    companion object {
+        const val SOURCE_MIC = "mic"
+        const val SOURCE_PHONE = "phone"
+        const val SOURCE_TYPED = "typed"
+    }
+
     /** The latest change, when it was a fix by Ask that the user hasn't undone. */
     val correction: Revision? get() = revisions.lastOrNull()?.takeIf { it.by != Revision.USER_UNDO }
     val done: Boolean get() = status == SegmentStatus.DONE || status == SegmentStatus.NO_SPEECH || status == SegmentStatus.SKIPPED
@@ -91,6 +104,8 @@ data class Project(
     val totalMs: Long = 0,
     /** Language pair, a data.LangPair code ("th-en", "th-my"). */
     val pair: String = "th-en",
+    /** Named by the app (date, then a title from Gemini), not by the user; a user's name is never replaced. */
+    val autoNamed: Boolean = false,
 )
 
 /** Where listening takes its sound from. */
@@ -137,22 +152,21 @@ object AppState {
     /** All projects on the phone, most recently used first. */
     val projects = MutableStateFlow<List<Project>>(emptyList())
 
-    /** The open project; its captions are in [captions]. Null = projects home. */
-    val currentProject = MutableStateFlow<Project?>(null)
-    /** Language pair of the open project; new pieces are interpreted in it. */
-    val pair: com.example.lingualocal.data.LangPair get() = com.example.lingualocal.data.LangPair.of(currentProject.value?.pair)
+    /** The project on screen. Null = projects home. */
+    val view = MutableStateFlow<ProjectSpace?>(null)
+    /**
+     * The project the latest listening session records into. It keeps recording there while the user looks at
+     * other projects ([view]), and stays set after listening stops so late translations still land in it.
+     */
+    val live = MutableStateFlow<ProjectSpace?>(null)
+    /** Id of the project being recorded right now, or null when not listening. */
+    fun liveId(): String? = if (running.value) live.value?.id else null
 
     /** Pair picked on the home screen for the next new project; null = the pair of the project used last. */
     val nextPair = MutableStateFlow<com.example.lingualocal.data.LangPair?>(null)
 
     /** Start time of the current listening session. */
     @Volatile var session: Long = 0
-
-    val captions = MutableStateFlow<List<Caption>>(emptyList())
-    private val nextId = AtomicLong(1)
-
-    /** After loading a project, new pieces continue after its highest id (ids also name the audio files). */
-    fun continueIds() = nextId.set((captions.value.maxOfOrNull { it.id } ?: 0) + 1)
 
     /** Held down while the user speaks English with the push-to-talk button. */
     val pushToTalk = MutableStateFlow(false)
@@ -161,17 +175,51 @@ object AppState {
     /** True while the Thai voice is reading out the user's translation (the mic ignores it). */
     val ttsSpeaking = MutableStateFlow(false)
 
-    fun newCaption(mine: Boolean = false): Long {
+}
+
+/**
+ * One project held in memory: its details and its pieces. Two can be open at once, the one being recorded
+ * ([AppState.live]) and the one on screen ([AppState.view]); when they are the same project they are the same
+ * object. Saved to disk by data.ProjectStore shortly after anything changes.
+ */
+class ProjectSpace(project: Project) {
+    val project = MutableStateFlow(project)
+    val id: String = project.id
+    val captions = MutableStateFlow<List<Caption>>(emptyList())
+    private val nextId = AtomicLong(1)
+
+    /** The pieces read from disk. New pieces continue after the highest id (ids also name the audio files). */
+    internal fun fill(pieces: List<Caption>) {
+        captions.value = pieces
+        nextId.set((pieces.maxOfOrNull { it.id } ?: 0) + 1)
+    }
+
+    /** Language pair of this project; new pieces are interpreted in it. */
+    val pair: com.example.lingualocal.data.LangPair get() = com.example.lingualocal.data.LangPair.of(project.value.pair)
+
+    fun newCaption(mine: Boolean = false, source: String? = null): Long {
         val id = nextId.getAndIncrement()
-        val s = session.takeIf { it > 0 } ?: System.currentTimeMillis()
-        captions.update { it + Caption(id, mine = mine, session = s) }
+        val s = AppState.session.takeIf { it > 0 } ?: System.currentTimeMillis()
+        val src = source ?: if (AppState.runningSource.value == AudioSource.PHONE) Caption.SOURCE_PHONE else Caption.SOURCE_MIC
+        captions.update { it + Caption(id, mine = mine, session = s, source = src) }
         return id
     }
 
-    fun caption(id: Long): Caption? = captions.value.firstOrNull { it.id == id }
+    /** Pieces being worked on are near the end, so lookups start there (fast in long projects). */
+    fun caption(id: Long): Caption? = captions.value.lastOrNull { it.id == id }
 
+    /** Changes one piece; the others stay the same objects (saving and the screen skip unchanged pieces). */
     fun updateCaption(id: Long, transform: (Caption) -> Caption) {
-        captions.update { list -> list.map { if (it.id == id) transform(it) else it } }
+        captions.update { list ->
+            val i = list.indexOfLast { it.id == id }
+            if (i < 0) return@update list
+            val next = transform(list[i])
+            if (next === list[i]) list else list.toMutableList().also { it[i] = next }
+        }
     }
 
+    /** Saving state, used only by data.ProjectStore. */
+    internal var db: com.example.lingualocal.data.PieceDb? = null
+    internal val saved = HashMap<Long, Caption>()
+    internal var saver: kotlinx.coroutines.Job? = null
 }

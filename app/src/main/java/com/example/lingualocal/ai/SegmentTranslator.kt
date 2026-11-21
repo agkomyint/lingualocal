@@ -12,6 +12,7 @@ import com.example.lingualocal.Config
 import com.example.lingualocal.SegmentStatus
 import com.example.lingualocal.Turn
 import com.example.lingualocal.audio.LanguageId
+import com.example.lingualocal.audio.People
 import com.example.lingualocal.audio.SegmentAudio
 import com.example.lingualocal.audio.Speaker
 import com.google.firebase.Firebase
@@ -50,6 +51,8 @@ class SegmentTranslator(
     private val context: Context,
     private val scope: CoroutineScope,
     private val speaker: Speaker,
+    /** The project being recorded: every piece of this session goes into it. */
+    private val space: com.example.lingualocal.ProjectSpace,
 ) {
 
     /** One model per language pair (the instructions differ). */
@@ -61,6 +64,8 @@ class SegmentTranslator(
             "speaker" to Schema.string("A, B, C… in order of first appearance in this recording"),
             "transcript" to Schema.string("What this person said, in the original language"),
             "translation" to Schema.string("Translation into the other language"),
+            "start" to Schema.double("Second in this recording where this turn starts, e.g. 0.0 or 2.4"),
+            "end" to Schema.double("Second in this recording where this turn ends"),
         )
         return Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel(
             modelName = Config.SEGMENT_MODEL,
@@ -91,11 +96,11 @@ class SegmentTranslator(
     private val memoryBytes = AtomicLong(0)
 
     /** Queue one segment's 16 kHz PCM for translation. */
-    fun submit(id: Long, pcm: ByteArray) {
+    fun submit(id: Long, pcm: ByteArray, voicedMs: Long = pcm.size / 32L) {
         val size = pcm.size
-        val pair = AppState.pair // the project's pair when this was recorded
+        val pair = space.pair // the project's pair when this was recorded
         AppState.bufferedBytes.update { it + size }
-        AppState.updateCaption(id) { if (it.done) it else it.copy(status = SegmentStatus.QUEUED) }
+        space.updateCaption(id) { if (it.done) it else it.copy(status = SegmentStatus.QUEUED) }
         // Keep the audio in memory, or park it on disk when a lot is already waiting (long offline stretch).
         val held = AtomicReference<ByteArray?>(pcm)
         val spill = if (memoryBytes.get() + size > MEMORY_LIMIT) File(context.cacheDir, "pending_$id.pcm") else null
@@ -113,19 +118,19 @@ class SegmentTranslator(
                     attempt++
                     if (!online() && !pair.worksOffline) {
                         // No on-device Burmese: wait for the internet instead of guessing.
-                        AppState.updateCaption(id) { it.copy(status = SegmentStatus.QUEUED, note = "${Lang.name(pair.b)} needs internet · will translate when it's back") }
+                        space.updateCaption(id) { it.copy(status = SegmentStatus.QUEUED, note = "${Lang.name(pair.b)} needs internet · will translate when it's back") }
                         delay(backoff)
                         backoff = (backoff * 2).coerceAtMost(15_000L)
                         continue
                     }
                     if (!online() && OfflineSpeech.ready) {
                         // No internet: transcribe and translate on the device instead of waiting.
-                        translateOffline(id, held.get() ?: spill!!.readBytes())
+                        translateOffline(id, held.get() ?: spill!!.readBytes(), voicedMs)
                         break
                     }
                     try {
                         val result = parallel.withPermit {
-                            AppState.updateCaption(id) { it.copy(status = SegmentStatus.TRANSLATING) }
+                            space.updateCaption(id) { it.copy(status = SegmentStatus.TRANSLATING) }
                             val wav = SegmentAudio.wav(held.get() ?: spill!!.readBytes())
                             val started = System.currentTimeMillis()
                             val response = model(pair).generateContent(
@@ -137,12 +142,7 @@ class SegmentTranslator(
                             Log.d(TAG, "#$id answered in ${System.currentTimeMillis() - started} ms (attempt $attempt)")
                             JSONObject(response.text ?: "{}")
                         }
-                        val noWords = result.optString("language") == "none" || result.optString("translation").isBlank()
-                        if (noWords && size >= MIN_RECHECK_BYTES && attempt < 2) {
-                            Log.d(TAG, "#$id came back as no words · checking once more")
-                            continue
-                        }
-                        apply(id, result)
+                        apply(id, result, held.get() ?: spill!!.readBytes(), voicedMs)
                         break
                     } catch (e: CancellationException) {
                         throw e
@@ -150,14 +150,14 @@ class SegmentTranslator(
                         if (e is PromptBlockedException || e is ResponseStoppedException) {
                             // Gemini refuses this audio for good; retrying won't change that.
                             Log.w(TAG, "#$id refused by Gemini: ${e.message?.take(200)}")
-                            AppState.updateCaption(id) {
+                            space.updateCaption(id) {
                                 it.copy(status = SegmentStatus.NO_SPEECH, note = "Gemini wouldn't process this piece")
                             }
                             break
                         }
                         val (note, permanent) = reason(e)
                         Log.w(TAG, "#$id failed (attempt $attempt): ${e.javaClass.simpleName}: ${e.message?.take(200)} · retrying in ${backoff / 1000} s")
-                        AppState.updateCaption(id) { it.copy(status = SegmentStatus.QUEUED, note = note) }
+                        space.updateCaption(id) { it.copy(status = SegmentStatus.QUEUED, note = note) }
                         delay(backoff)
                         backoff = (backoff * 2).coerceAtMost(if (permanent) 60_000L else 15_000L)
                     }
@@ -170,14 +170,14 @@ class SegmentTranslator(
     }
 
     /** On-device path: detect Thai/English, ML Kit speech recognition in that language, then ML Kit Translate. */
-    private suspend fun translateOffline(id: Long, pcm: ByteArray) {
-        AppState.updateCaption(id) { it.copy(status = SegmentStatus.TRANSLATING, note = "No internet · translating on the device", offline = true) }
+    private suspend fun translateOffline(id: Long, pcm: ByteArray, voicedMs: Long) {
+        space.updateCaption(id) { it.copy(status = SegmentStatus.TRANSLATING, note = "No internet · translating on the device", offline = true) }
         // Thai unless the detector is fairly sure it's English (Thai is the common case here).
         val pThai = languageId?.thaiProbability(pcm) ?: 1f
         val isThai = pThai >= 0.3f || !OfflineSpeech.englishReady
         val heard = OfflineSpeech.transcribe(pcm, isThai).orEmpty()
         if (heard.isBlank()) {
-            AppState.updateCaption(id) { it.copy(status = SegmentStatus.NO_SPEECH, note = null, offline = true) }
+            space.updateCaption(id) { it.copy(status = SegmentStatus.NO_SPEECH, note = null, offline = true) }
             Log.d(TAG, "offline #$id: no words")
             return
         }
@@ -185,11 +185,12 @@ class SegmentTranslator(
         val translated = runCatching { OfflineTranslator.translate(heard) }.getOrElse {
             Log.w(TAG, "offline #$id translate failed: $it"); ""
         }
-        AppState.updateCaption(id) {
+        space.updateCaption(id) {
             it.copy(heard = heard, translation = translated, note = if (translated.isBlank()) "Offline translator not ready" else null,
                 status = SegmentStatus.DONE, offline = true, lang = if (isThai) Lang.TH else Lang.EN, engine = Lang.DEVICE_ENGINE)
         }
         Log.d(TAG, "turn done #$id [offline ${if (isThai) "th" else "en"} p=%.2f]: heard".format(pThai) + "=\"$heard\" said=\"$translated\"")
+        identifyPeople(id, pcm, voicedMs, emptyList())
         if (translated.isNotBlank()) speaker.say(translated, "seg-$id")
     }
 
@@ -213,22 +214,25 @@ class SegmentTranslator(
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
 
-    private fun apply(id: Long, json: JSONObject) {
+    private fun apply(id: Long, json: JSONObject, pcm: ByteArray, voicedMs: Long) {
         val language = json.optString("language")
         val transcript = json.optString("transcript").trim()
         val translation = json.optString("translation").trim()
         val words = language != "none" && transcript.isNotBlank() && translation.isNotBlank()
-        val turns = json.optJSONArray("turns")?.let { a ->
-            (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map {
-                it.optString("transcript").trim().let { heard ->
-                    Turn(it.optString("speaker").trim().ifBlank { "?" }, heard, it.optString("translation").trim(), Lang.of(heard))
-                }
-            }.filter { it.heard.isNotBlank() }
+        // Each turn with where it is in the audio (seconds), to match its voice to a person.
+        val timed = json.optJSONArray("turns")?.let { a ->
+            (0 until a.length()).mapNotNull { a.optJSONObject(it) }.mapNotNull { o ->
+                val heard = o.optString("transcript").trim()
+                if (heard.isBlank()) null
+                else Turn(o.optString("speaker").trim().ifBlank { "?" }, heard, o.optString("translation").trim(), Lang.of(heard)) to
+                    (o.optDouble("start", -1.0) to o.optDouble("end", -1.0))
+            }
         }.orEmpty()
+        val turns = timed.map { it.first }
         // Only show the split when Gemini really heard more than one voice in this piece.
         val split = if (turns.map { it.speaker }.distinct().size > 1) turns else emptyList()
         if (words && Speaker.isEcho(transcript)) return markEcho(id, transcript)
-        AppState.updateCaption(id) {
+        space.updateCaption(id) {
             if (words) it.copy(
                 heard = transcript, translation = translation, turns = split, note = null, status = SegmentStatus.DONE,
                 lang = language.takeIf { l -> l == Lang.TH || l == Lang.EN || l == Lang.MY } ?: Lang.of(transcript),
@@ -238,19 +242,53 @@ class SegmentTranslator(
         }
         Log.d(TAG, "turn done #$id [$language]: heard=\"$transcript\" said=\"$translation\"" +
             if (split.isNotEmpty()) " voices=${split.map { it.speaker }.distinct()}" else "")
+        if (words) identifyPeople(id, pcm, voicedMs, if (split.isNotEmpty()) timed else emptyList())
         if (words) speaker.say(translation, "seg-$id")
+    }
+
+    /**
+     * Matches who spoke to the people of this project, on the device. With turns (two or more voices), each
+     * voice's stretches of audio are cut out and matched on their own; otherwise the whole piece is one person.
+     */
+    private fun identifyPeople(id: Long, pcm: ByteArray, voicedMs: Long, timed: List<Pair<Turn, Pair<Double, Double>>>) {
+        if (space.caption(id)?.mine == true) return // the user's own push-to-talk
+        scope.launch(Dispatchers.Default) {
+            runCatching {
+                val byVoice = LinkedHashMap<String, java.io.ByteArrayOutputStream>()
+                for ((t, span) in timed) {
+                    val (s, e) = span
+                    if (s < 0 || e <= s) continue
+                    var from = (s * 16_000).toInt() * 2
+                    var to = (e * 16_000).toInt() * 2
+                    if (to - from > 19_200) { from += 3_200; to -= 3_200 } // drop 0.1 s at each edge: less of the other voice
+                    from = from.coerceIn(0, pcm.size); to = to.coerceIn(from, pcm.size)
+                    if (to > from) byVoice.getOrPut(t.speaker) { java.io.ByteArrayOutputStream() }.write(pcm, from, to - from)
+                }
+                val people = byVoice.mapValues { (_, b) -> People.identify(space.id, b.toByteArray(), b.size() / 32L) }
+                if (people.values.any { it != null }) {
+                    space.updateCaption(id) { c ->
+                        val withPeople = c.turns.map { t -> t.copy(person = people[t.speaker]) }
+                        val main = withPeople.filter { it.person != null }.maxByOrNull { it.heard.length }?.person
+                        c.copy(turns = withPeople, speaker = main ?: c.speaker)
+                    }
+                    Log.d(TAG, "#$id people by turn: $people")
+                } else {
+                    val who = People.identify(space.id, pcm, voicedMs)
+                    if (who != null) space.updateCaption(id) { it.copy(speaker = who) }
+                }
+            }.onFailure { Log.w(TAG, "#$id speaker match failed: $it") }
+        }
     }
 
     /** The mic picked up our own spoken translation: keep it out of the conversation and don't speak it again. */
     private fun markEcho(id: Long, heard: String) {
-        AppState.updateCaption(id) { it.copy(heard = "", translation = "", turns = emptyList(), note = "Echo of the app's voice · ignored", status = SegmentStatus.SKIPPED) }
+        space.updateCaption(id) { it.copy(heard = "", translation = "", turns = emptyList(), note = "Echo of the app's voice · ignored", status = SegmentStatus.SKIPPED) }
         Log.d(TAG, "turn #$id ignored: echo of our own voice \"$heard\"")
     }
 
     companion object {
         private const val TAG = "SegmentTranslator"
         private const val PARALLEL_REQUESTS = 3
-        private const val MIN_RECHECK_BYTES = 48_000 // 1.5 s of audio
         private const val MEMORY_LIMIT = 16L * 1024 * 1024 // ~8 min of waiting speech in memory, the rest on disk
 
         /** Removes audio parked by a previous run (its captions are gone). */

@@ -9,6 +9,7 @@ import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import com.example.lingualocal.Caption
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
 
@@ -58,7 +59,13 @@ object PlayAll {
         SegmentAudio.stop()
         source = items
         queue = items.filter { playable(it, mode.value) }
-        val start = fromId?.let { id -> queue.indexOfFirst { it.id == id }.takeIf { it >= 0 } } ?: 0
+        if (queue.isEmpty()) {
+            android.widget.Toast.makeText(appContext, "No recorded sound to play here", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        // From a piece without sound: start at the next one that has it, never back at the beginning.
+        val from = fromId?.let { id -> items.firstOrNull { it.id == id } }
+        val start = from?.let { f -> queue.indexOfFirst { it.time >= f.time }.takeIf { it >= 0 } } ?: 0
         play(start)
     }
 
@@ -67,10 +74,17 @@ object PlayAll {
 
     /** Reads one translation aloud, on tap. Tapping the same one again stops it. */
     fun say(text: String, key: String) {
-        if (saying.value == key) { tts?.stop(); com.example.lingualocal.ai.CloudVoice.stop(); saying.value = null; return }
+        if (saying.value == key) { tts?.stop(); releasePlayer(); com.example.lingualocal.ai.CloudVoice.stop(); saying.value = null; return }
         stop()
         SegmentAudio.stop()
         if (text.isBlank()) return
+        // Saved voice for this piece: plays offline, no voice engine needed.
+        key.toLongOrNull()?.let { com.example.lingualocal.AppState.view.value?.caption(it) }?.let { TranslationVoice.saved(it, text) }?.let { f ->
+            Speaker.remember(text)
+            saying.value = key
+            player = playFile(f, onEnd = { if (saying.value == key) saying.value = null })
+            if (player == null) saying.value = null else return
+        }
         val engine = tts
         if (engine == null || !ttsReady) {
             saying.value = key
@@ -82,10 +96,21 @@ object PlayAll {
         }
         val lang = com.example.lingualocal.data.Lang.of(text)
         if (engine.setLanguage(com.example.lingualocal.data.Lang.locale(lang)) < TextToSpeech.LANG_AVAILABLE) {
-            // No voice for this language on the device (Burmese usually): Gemini reads it instead.
+            // No voice for this language on the device (Burmese usually): Gemini makes it once, it's saved, then played.
             Speaker.remember(text)
             saying.value = key
-            com.example.lingualocal.ai.CloudVoice.speak(text, onFail = { failedVoice(lang) }, onDone = { if (saying.value == key) saying.value = null })
+            val id = key.toLongOrNull()
+            if (id == null) {
+                com.example.lingualocal.ai.CloudVoice.speak(text, onFail = { failedVoice(lang) }, onDone = { if (saying.value == key) saying.value = null })
+                return
+            }
+            voiceScope.launch {
+                val f = com.example.lingualocal.AppState.view.value?.let { TranslationVoice.voiceFile(it, id) }
+                if (saying.value != key) return@launch
+                if (f == null) { failedVoice(lang); saying.value = null; return@launch }
+                player = playFile(f, onEnd = { if (saying.value == key) saying.value = null })
+                if (player == null) saying.value = null
+            }
             return
         }
         Speaker.remember(text)
@@ -94,6 +119,8 @@ object PlayAll {
         saying.value = key
         engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "say-$key")
     }
+
+    private val voiceScope = kotlinx.coroutines.MainScope()
 
     fun stop() {
         generation++
@@ -173,6 +200,11 @@ object PlayAll {
 
     private fun speak(c: Caption, gen: Int) {
         val text = spokenText(c)
+        TranslationVoice.saved(c, text)?.let { f ->
+            Speaker.remember(text)
+            player = playFile(f, onEnd = { advance(gen) }, rate = speed())
+            if (player != null) return
+        }
         val engine = tts
         if (engine == null || !ttsReady) {
             // First use: start the voice, then speak this piece.
@@ -185,7 +217,14 @@ object PlayAll {
         Speaker.remember(text)
         val lang = com.example.lingualocal.data.Lang.of(text)
         if (engine.setLanguage(com.example.lingualocal.data.Lang.locale(lang)) < TextToSpeech.LANG_AVAILABLE) {
-            com.example.lingualocal.ai.CloudVoice.speak(text, onFail = { failedVoice(lang) }, onDone = { advance(gen) })
+            // Made once by Gemini and saved, so playing again later is free.
+            voiceScope.launch {
+                val f = com.example.lingualocal.AppState.view.value?.let { TranslationVoice.voiceFile(it, c.id) }
+                if (gen != generation) return@launch
+                if (f == null) { failedVoice(lang); advance(gen); return@launch }
+                player = playFile(f, onEnd = { advance(gen) }, rate = speed())
+                if (player == null) advance(gen)
+            }
             return
         }
         engine.setAudioAttributes(SegmentAudio.playbackAttributes())
@@ -202,6 +241,18 @@ object PlayAll {
         @Deprecated("Deprecated in Java")
         override fun onError(id: String?) = onDone(id)
     }
+
+    private fun playFile(path: String, onEnd: () -> Unit, rate: Float = 1f): MediaPlayer? = runCatching {
+        MediaPlayer().apply {
+            setAudioAttributes(SegmentAudio.playbackAttributes())
+            setDataSource(path)
+            setOnCompletionListener { onEnd() }
+            setOnErrorListener { _, _, _ -> onEnd(); true }
+            prepare()
+            start()
+            if (rate != 1f) playbackParams = playbackParams.setSpeed(rate)
+        }
+    }.getOrElse { Log.w(TAG, "can't play $path: $it"); null }
 
     private fun releasePlayer() {
         player?.release()

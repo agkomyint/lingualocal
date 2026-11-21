@@ -28,7 +28,17 @@ class SpeakerId(context: Context) : AutoCloseable {
     private val mutex = Mutex()
     private val voices = mutableListOf<Voice>()
 
-    private class Voice(val number: Int, val sum: FloatArray, var count: Int)
+    /** One person: the sum of their fingerprints (direction = their voice) and how many went into it. */
+    class Voice(val number: Int, val sum: FloatArray, var count: Int)
+
+    /** Starts from the people already known in a project. */
+    suspend fun restore(list: List<Voice>) = mutex.withLock {
+        voices.clear()
+        list.forEach { voices += Voice(it.number, it.sum.copyOf(), it.count) }
+    }
+
+    /** Copy of everyone known now, to save with the project. */
+    suspend fun snapshot(): List<Voice> = mutex.withLock { voices.map { Voice(it.number, it.sum.copyOf(), it.count) } }
 
     /**
      * Speaker number (1, 2, …) for one piece of 16 kHz PCM16 that has [voicedMs] of clear voice,
@@ -53,7 +63,7 @@ class SpeakerId(context: Context) : AutoCloseable {
                 best.number
             }
             voicedMs >= NEW_VOICE_MS && voices.size < MAX_VOICES ->
-                Voice(voices.size + 1, emb.copyOf(), 1).also { voices += it }.number
+                Voice((voices.maxOfOrNull { it.number } ?: 0) + 1, emb.copyOf(), 1).also { voices += it }.number
             else -> null
         }
         Log.d(TAG, "voice %.1f s · best match %s %.2f -> %s".format(
@@ -97,7 +107,7 @@ class SpeakerId(context: Context) : AutoCloseable {
         const val MATCH = 0.55f            // same voice above this (same person ~0.8, different <0.5 in tests)
         const val LEARN = 0.62f
         const val MAX_LEARN = 40
-        const val MAX_VOICES = 8
+        const val MAX_VOICES = 12
         const val MIN_FRAMES = 50          // 0.5 s of features
         const val MAX_SAMPLES = 16_000 * 15
     }

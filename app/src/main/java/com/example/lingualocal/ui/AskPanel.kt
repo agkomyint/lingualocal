@@ -32,7 +32,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -74,6 +75,9 @@ internal fun AskPanel(onClose: () -> Unit, modifier: Modifier = Modifier) {
     val busy by AskAssistant.busy.collectAsStateWithLifecycle()
     val activity by AskAssistant.activity.collectAsStateWithLifecycle()
     val liveSteps by AskAssistant.liveSteps.collectAsStateWithLifecycle()
+    val threads by AskAssistant.threads.collectAsStateWithLifecycle()
+    val currentThread by AskAssistant.currentThread.collectAsStateWithLifecycle()
+    var showChats by remember { mutableStateOf(false) }
     val online = remember(messages.size) { AskAssistant.online() }
     val listState = rememberLazyListState()
     var input by remember { mutableStateOf("") }
@@ -106,17 +110,26 @@ internal fun AskPanel(onClose: () -> Unit, modifier: Modifier = Modifier) {
                     color = if (online) LL.Faint else LL.Thai, fontSize = 12.sp,
                 )
             }
-            if (messages.isNotEmpty()) {
-                IconButton(onClick = AskAssistant::clear, enabled = !busy) {
-                    Icon(Icons.Outlined.Refresh, contentDescription = "New chat", tint = LL.Muted)
+            if (threads.isNotEmpty()) {
+                IconButton(onClick = { showChats = !showChats }, enabled = !busy) {
+                    Icon(Icons.Outlined.History, contentDescription = "Chats", tint = if (showChats) LL.English else LL.Muted)
+                }
+            }
+            if (messages.isNotEmpty() || showChats) {
+                IconButton(onClick = { AskAssistant.newChat(); showChats = false }, enabled = !busy) {
+                    Icon(Icons.Outlined.Add, contentDescription = "New chat", tint = LL.Muted)
                 }
             }
             IconButton(onClick = onClose) { Icon(Icons.Outlined.Close, contentDescription = "Close Ask", tint = LL.Muted) }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(LL.Line))
 
-        // Messages
-        LazyColumn(
+        if (showChats) {
+            ChatList(threads, currentThread, Modifier.weight(1f).fillMaxWidth()) { id ->
+                AskAssistant.open(id)
+                showChats = false
+            }
+        } else LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f).fillMaxWidth(),
             contentPadding = PaddingValues(16.dp),
@@ -190,6 +203,28 @@ internal fun AskPanel(onClose: () -> Unit, modifier: Modifier = Modifier) {
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(Icons.AutoMirrored.Outlined.Send, contentDescription = "Send", tint = if (canSend) LL.Bg else LL.Faint, modifier = Modifier.size(20.dp))
+            }
+        }
+    }
+}
+
+/** This project's saved chats, newest first. */
+@Composable
+private fun ChatList(threads: List<AskAssistant.Thread>, current: Long?, modifier: Modifier, onOpen: (Long) -> Unit) {
+    val fmt = remember { java.text.SimpleDateFormat("d MMM · HH:mm", java.util.Locale.getDefault()) }
+    LazyColumn(modifier, contentPadding = PaddingValues(vertical = 8.dp)) {
+        items(threads, key = { it.id }) { t ->
+            Column(
+                Modifier.fillMaxWidth().clickable { onOpen(t.id) }
+                    .background(if (t.id == current) LL.Selected else LL.Surface)
+                    .padding(horizontal = 18.dp, vertical = 12.dp),
+            ) {
+                Text(t.title.ifBlank { "Chat" }, color = LL.Text, fontSize = 15.sp, maxLines = 2)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    t.messages.count { it.role == AskAssistant.Role.USER }.let { n -> "${fmt.format(java.util.Date(t.updated))} · $n question${if (n == 1) "" else "s"}" },
+                    color = LL.Faint, fontSize = 12.sp,
+                )
             }
         }
     }
