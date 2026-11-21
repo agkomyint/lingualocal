@@ -4,18 +4,22 @@ kotlin = "2.4.21"
 googleServices = "4.6.0"
 coreKtx = "1.19.1"
 activityCompose = "1.13.0"
+coreSplashscreen = "1.2.0"
 lifecycle = "2.11.1"
 composeBom = "2026.11.01"
 firebaseBom = "35.2.0"
 firebaseAiOndevice = "16.0.0-beta08"
 onnxruntime = "1.32.0"
 mlkitTranslate = "17.0.3"
+mlkitSpeech = "1.0.0-alpha2"
+litertlm = "0.19.0"
 junit = "4.13.2"
 junitVersion = "1.1.5"
 espressoCore = "3.5.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-core-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "coreSplashscreen" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
 androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
@@ -29,9 +33,13 @@ androidx-compose-material-icons = { group = "androidx.compose.material", name = 
 firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
 firebase-ai = { group = "com.google.firebase", name = "firebase-ai" }
 firebase-ai-ondevice = { group = "com.google.firebase", name = "firebase-ai-ondevice", version.ref = "firebaseAiOndevice" }
+kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version = "1.8.1" }
 firebase-appcheck-debug = { group = "com.google.firebase", name = "firebase-appcheck-debug" }
+firebase-appcheck-playintegrity = { group = "com.google.firebase", name = "firebase-appcheck-playintegrity" }
 onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntime" }
 mlkit-translate = { group = "com.google.mlkit", name = "translate", version.ref = "mlkitTranslate" }
+mlkit-speech = { group = "com.google.mlkit", name = "genai-speech-recognition", version.ref = "mlkitSpeech" }
+litertlm-android = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litertlm" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }

@@ -14,7 +14,7 @@ android {
         applicationId = "com.example.lingualocal"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
+        versionCode = 2
         versionName = "0.1"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
 
@@ -44,6 +44,7 @@ android {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.core.splashscreen)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
@@ -60,11 +61,16 @@ dependencies {
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.ai)
     implementation(libs.firebase.ai.ondevice)
+    implementation(libs.kotlinx.serialization.json)
     implementation(libs.firebase.appcheck.debug)
+    implementation(libs.firebase.appcheck.playintegrity)
 
     // Our own on-device runtimes: ONNX Runtime (Silero VAD) + ML Kit (offline translation)
     implementation(libs.onnxruntime.android)
     implementation(libs.mlkit.translate)
+    implementation(libs.mlkit.speech)
+    // Gemma (open model) via LiteRT-LM: offline "What did they mean?" on phones without Gemini Nano
+    implementation(libs.litertlm.android)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)

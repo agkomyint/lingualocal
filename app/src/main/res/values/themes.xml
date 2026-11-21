@@ -1,5 +1,14 @@
 <resources>
+    <!-- Launch theme: the system splash (Android 12+ natively, older versions via core-splashscreen) shows the
+         LinguaLocal mark on the app background, then MainActivity switches to Theme.Lingualocal. -->
+    <style name="Theme.Lingualocal.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">#FF0D0F13</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="windowSplashScreenAnimationDuration">300</item>
+        <item name="postSplashScreenTheme">@style/Theme.Lingualocal</item>
+    </style>
+
     <style name="Theme.Lingualocal" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">#FF0F1115</item>
+        <item name="android:windowBackground">#FF0D0F13</item>
     </style>
 </resources>

@@ -3,44 +3,42 @@ package com.example.lingualocal.ai
 import android.util.Log
 import com.example.lingualocal.AppState
 import com.example.lingualocal.Config
-import com.example.lingualocal.audio.PcmPlayer
+import com.example.lingualocal.SegmentStatus
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.AudioTranscriptionConfig
 import com.google.firebase.ai.type.GenerativeBackend
 import com.google.firebase.ai.type.InlineData
-import com.google.firebase.ai.type.InlineDataPart
 import com.google.firebase.ai.type.LiveServerContent
 import com.google.firebase.ai.type.LiveServerGoAway
 import com.google.firebase.ai.type.LiveSession
 import com.google.firebase.ai.type.LiveSessionResumptionUpdate
 import com.google.firebase.ai.type.PublicPreviewAPI
-import com.google.firebase.ai.type.RealtimeInputConfig
 import com.google.firebase.ai.type.ResponseModality
 import com.google.firebase.ai.type.SessionResumptionConfig
-import com.google.firebase.ai.type.activityDetectionConfig
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.liveGenerationConfig
-import com.google.firebase.ai.type.realtimeInputConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/** A piece of one speech segment's audio (16 kHz PCM16). */
+class AudioChunk(val segmentId: Long, val bytes: ByteArray)
+
 /**
- * Always-on interpreter on the Gemini Live API (Firebase AI Logic).
- * Audio chunks come in from the mic loop; translated speech goes to [player]; transcripts go to [AppState].
- * The connection is refreshed automatically (session resumption) so listening never stops.
+ * Live preview on the Gemini Live API (Firebase AI Logic): streams speech as it is recorded and shows
+ * Gemini's running transcript on the card that is being recorded, so the user sees the Thai words
+ * while the person is still talking. The final transcript and translation of every card come from
+ * [SegmentTranslator]; this preview never decides what a card says in the end.
+ * While disconnected, preview audio is dropped (the segment itself is kept and translated later).
  */
 @OptIn(PublicPreviewAPI::class)
-class LiveInterpreter(private val player: PcmPlayer) {
+class LiveInterpreter {
 
     private val model by lazy {
         Firebase.ai(backend = GenerativeBackend.googleAI()).liveModel(
@@ -48,106 +46,80 @@ class LiveInterpreter(private val player: PcmPlayer) {
             generationConfig = liveGenerationConfig {
                 responseModality = ResponseModality.AUDIO
                 inputAudioTranscription = AudioTranscriptionConfig()
-                outputAudioTranscription = AudioTranscriptionConfig()
-                realtimeInputConfig = realtimeInputConfig {
-                    // Keep translating even if someone starts talking over the translation.
-                    activityHandling = RealtimeInputConfig.ActivityHandling.NO_INTERRUPT
-                    automaticActivityDetection = activityDetectionConfig {
-                        silenceDurationMs = 600
-                    }
-                }
             },
-            systemInstruction = content { text(Config.INTERPRETER_PROMPT) },
+            systemInstruction = content { text(Config.PREVIEW_PROMPT) },
         )
     }
 
-    private val session = MutableStateFlow<LiveSession?>(null)
-    private var openCaption: Long? = null
+    @Volatile private var session: LiveSession? = null
 
-    suspend fun run(audio: ReceiveChannel<ByteArray>) = coroutineScope {
-        // Sender: waits for a live session, so audio buffers (instead of being lost) while reconnecting.
+    suspend fun run(audio: ReceiveChannel<AudioChunk>) = coroutineScope {
         launch {
-            var sent = 0L
-            var lastLogged = 0L
             for (chunk in audio) {
-                val s = session.filterNotNull().first()
+                val s = session ?: continue
                 try {
-                    s.sendAudioRealtime(InlineData(chunk, MIME_PCM_16K))
-                    sent += chunk.size
-                    if (sent - lastLogged >= 32_000) { Log.d(TAG, "sent ${sent / 32_000}s of audio to Gemini"); lastLogged = sent }
+                    s.sendAudioRealtime(InlineData(chunk.bytes, MIME_PCM_16K))
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    Log.w(TAG, "send failed: ${e.message}")
+                    Log.w(TAG, "preview send failed: ${e.message}")
                 }
             }
         }
+        connectLoop()
+    }
 
+    private suspend fun connectLoop() {
         var handle: String? = null
         var backoffMs = 1_000L
-        while (isActive) {
-            var s: LiveSession? = null
-            var refresh = false
-            try {
-                AppState.liveStatus.value = "Connecting…"
-                s = model.connect(handle?.let { SessionResumptionConfig(it) } ?: SessionResumptionConfig())
-                session.value = s
-                AppState.liveStatus.value = "Live · listening"
-                backoffMs = 1_000L
-                s.receive().collect { msg ->
-                    if (msg is LiveServerContent) {
-                        Log.d(TAG, "server: in=${msg.inputTranscription?.text} out=${msg.outputTranscription?.text} " +
-                            "audioParts=${msg.content?.parts?.count { it is InlineDataPart }} turnComplete=${msg.turnComplete} interrupted=${msg.interrupted}")
-                    } else Log.d(TAG, "server: ${msg::class.simpleName}")
-                    when (msg) {
-                        is LiveServerContent -> onContent(msg)
-                        is LiveSessionResumptionUpdate ->
-                            if (msg.resumable == true && msg.newHandle != null) handle = msg.newHandle
-                        is LiveServerGoAway -> {
-                            AppState.liveStatus.value = "Refreshing session…"
-                            refresh = true
-                            s.stopReceiving()
+        coroutineScope {
+            while (isActive) {
+                var s: LiveSession? = null
+                var refresh = false
+                try {
+                    AppState.liveStatus.value = "Connecting…"
+                    s = model.connect(handle?.let { SessionResumptionConfig(it) } ?: SessionResumptionConfig())
+                    session = s
+                    AppState.liveStatus.value = "Live · listening"
+                    Log.d(TAG, "connected to ${Config.LIVE_MODEL}")
+                    backoffMs = 1_000L
+                    s.receive().collect { msg ->
+                        when (msg) {
+                            is LiveServerContent -> onContent(msg)
+                            is LiveSessionResumptionUpdate ->
+                                if (msg.resumable == true && msg.newHandle != null) handle = msg.newHandle
+                            is LiveServerGoAway -> {
+                                refresh = true
+                                s.stopReceiving()
+                            }
+                            else -> Unit
                         }
-                        else -> Unit
                     }
+                    refresh = true
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "live session error: $e")
+                    AppState.liveStatus.value = "Offline · ${e.message?.take(80) ?: e.javaClass.simpleName} · retrying"
+                } finally {
+                    session = null
+                    withContext(NonCancellable) { runCatching { s?.close() } }
                 }
-                refresh = true // stream ended without an error: reconnect right away
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "live session error", e)
-                AppState.liveStatus.value = "Error: ${e.message?.take(120)} · retrying"
-            } finally {
-                session.value = null
-                withContext(NonCancellable) { runCatching { s?.close() } }
-            }
-            if (!refresh) {
-                delay(backoffMs)
-                backoffMs = (backoffMs * 2).coerceAtMost(15_000L)
+                if (!refresh) {
+                    delay(backoffMs)
+                    backoffMs = (backoffMs * 2).coerceAtMost(15_000L)
+                }
             }
         }
     }
 
     private fun onContent(msg: LiveServerContent) {
-        if (msg.interrupted) player.flush()
-
-        msg.content?.parts?.forEach { part ->
-            if (part is InlineDataPart && part.mimeType.startsWith("audio/pcm") && AppState.speakAloud.value) {
-                player.enqueue(part.inlineData)
-            }
-        }
-        msg.inputTranscription?.text?.takeIf { it.isNotEmpty() }?.let { t ->
-            val id = openCaption ?: AppState.newCaption().also { openCaption = it }
-            AppState.updateCaption(id) { it.copy(heard = it.heard + t) }
-        }
-        msg.outputTranscription?.text?.takeIf { it.isNotEmpty() }?.let { t ->
-            val id = openCaption ?: AppState.newCaption().also { openCaption = it }
-            AppState.updateCaption(id) { it.copy(translation = it.translation + t) }
-        }
-        if (msg.turnComplete) {
-            openCaption?.let { id -> AppState.updateCaption(id) { it.copy(done = true) } }
-            openCaption = null
-        }
+        val t = msg.inputTranscription?.text?.takeIf { it.isNotBlank() } ?: return
+        // Show it on the newest card that is still being recorded or waiting for its translation.
+        val target = AppState.captions.value.lastOrNull {
+            !it.mine && (it.status == SegmentStatus.RECORDING || it.status == SegmentStatus.QUEUED)
+        } ?: return
+        AppState.updateCaption(target.id) { if (it.done) it else it.copy(preview = it.preview + t) }
     }
 
     private companion object {
