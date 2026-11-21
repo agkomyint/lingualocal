@@ -56,7 +56,7 @@ export function AskPanel({ onClose, className }: { onClose: () => void; classNam
         <div className="ml-2.5 flex-1">
           <div className="text-[16px] font-semibold text-text">Ask</div>
           <div className={cn("text-[12px]", usable ? "text-faint" : "text-thai")}>
-            {nano ? "Gemini Nano · on this device, reads the text" : online ? "Gemini · reads and listens to this project" : "Offline · needs internet"}
+            {nano ? "Gemini Nano · on this device" : online ? "Gemini · reads and listens to this project" : "Offline · needs internet"}
           </div>
         </div>
         {threads.length > 0 && (
@@ -128,22 +128,18 @@ export function AskPanel({ onClose, className }: { onClose: () => void; classNam
 function EngineSwitch({ engine, busy }: { engine: Engine; busy: boolean }) {
   const opt = (e: Engine, label: string) => (
     <button role="radio" aria-checked={engine === e} disabled={busy} onClick={() => setEngine(e)}
-      className={cn("h-8 rounded-full px-3.5 text-[13px] font-medium disabled:opacity-50",
+      className={cn("h-6 rounded-full px-2.5 text-[12px] font-medium disabled:opacity-50",
         engine === e ? "bg-english text-bg forced-colors:outline-2 forced-colors:outline-solid forced-colors:outline-[Highlight] forced-colors:font-bold" : "text-muted hover:text-text")}>
       {label}
     </button>
   );
   return (
-    <div className="border-b border-line px-4 py-2.5">
-      <div role="radiogroup" aria-label="Ask model" className="inline-flex rounded-full border border-line-strong bg-raised p-0.5">
+    <div className="flex items-center gap-2.5 border-b border-line px-4 py-1.5">
+      <div role="radiogroup" aria-label="Ask model" className="inline-flex shrink-0 rounded-full border border-line-strong bg-raised p-px">
         {opt("cloud", "Cloud")}
         {opt("nano", "Nano")}
       </div>
-      {engine === "nano" && (
-        <p className="mt-1.5 text-[12px] leading-[16px] text-faint">
-          Nano reads text only. Switch to Cloud to listen to recordings, fix transcripts or search the web.
-        </p>
-      )}
+      {engine === "nano" && <span className="truncate text-[11px] text-faint">Text only · no listening or web</span>}
     </div>
   );
 }
