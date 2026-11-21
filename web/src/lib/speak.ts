@@ -94,7 +94,35 @@ export async function recordVoice(text: string): Promise<Uint8Array> {
   const out = new Uint8Array(size);
   let o = 0;
   for (const c of chunks) { out.set(c, o); o += c.length; }
-  return out;
+  return wavData(out) ?? out;
+}
+
+const tag = (b: Uint8Array, at: number) => String.fromCharCode(b[at], b[at + 1], b[at + 2], b[at + 3]);
+
+/**
+ * The samples of a WAV file, or null if the bytes aren't one. Gemini's voice now comes as a whole WAV file
+ * with a signed Content Credentials (C2PA) block after the audio; played as raw samples, the header clicks
+ * and that block buzzes at the end.
+ */
+export function wavData(b: Uint8Array): Uint8Array | null {
+  if (b.length < 12 || tag(b, 0) !== "RIFF" || tag(b, 8) !== "WAVE") return null;
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  for (let pos = 12; pos + 8 <= b.length;) {
+    const size = dv.getUint32(pos + 4, true);
+    const body = pos + 8;
+    if (tag(b, pos) === "data") return b.subarray(body, size && body + size <= b.length ? body + size : b.length);
+    pos = body + size + (size & 1);
+  }
+  return null;
+}
+
+/** Voice clips saved before the fix hold Gemini's whole WAV file inside ours; keep only its samples. */
+async function cleanVoice(blob: Blob): Promise<Blob> {
+  if (blob.size < 56) return blob;
+  const head = new Uint8Array(await blob.slice(0, 56).arrayBuffer());
+  if (tag(head, 0) !== "RIFF" || tag(head, 44) !== "RIFF") return blob;
+  const inner = wavData(new Uint8Array(await blob.arrayBuffer()).subarray(44));
+  return inner ? new Blob([wav(inner, SPEAKER_SAMPLE_RATE) as BlobPart], { type: "audio/wav" }) : blob;
 }
 
 let player: HTMLAudioElement | null = null;
@@ -102,11 +130,13 @@ let playUrl: string | null = null;
 let playGen = 0;
 
 /** Plays a recording to the end (or until stopped). */
-export function playBlob(blob: Blob, rate = 1): Promise<void> {
+export async function playBlob(blob: Blob, rate = 1): Promise<void> {
   stopPlayer();
   const gen = ++playGen;
+  const clean = await cleanVoice(blob);
+  if (gen !== playGen) return;
   return new Promise((resolve) => {
-    const url = URL.createObjectURL(blob);
+    const url = URL.createObjectURL(clean);
     const a = new Audio(url);
     player = a; playUrl = url;
     a.playbackRate = rate;

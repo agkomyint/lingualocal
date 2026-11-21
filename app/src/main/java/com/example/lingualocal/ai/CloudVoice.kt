@@ -51,6 +51,48 @@ object CloudVoice {
     /** Only the text itself: the speech model reads out everything it is sent, instructions included. */
     private fun prompt(text: String) = text
 
+    /**
+     * Gemini's voice now comes as a whole WAV file with a signed Content Credentials (C2PA) block after the
+     * audio. Played as raw samples, the header clicks at the start and that block buzzes at the end. This keeps
+     * only the samples, fed piece by piece as they stream in; bytes that aren't a WAV file pass through unchanged.
+     */
+    private class WavSamples {
+        private val head = java.io.ByteArrayOutputStream()
+        private var started = false
+        private var left = Long.MAX_VALUE
+
+        fun feed(bytes: ByteArray): ByteArray {
+            if (!started) {
+                head.write(bytes)
+                val b = head.toByteArray()
+                if (b.size < 12) return ByteArray(0)
+                started = true
+                if (String(b, 0, 4) != "RIFF" || String(b, 8, 4) != "WAVE") return take(b, 0)
+                val buf = java.nio.ByteBuffer.wrap(b).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                var pos = 12
+                while (pos + 8 <= b.size) {
+                    val size = buf.getInt(pos + 4).toLong() and 0xFFFFFFFFL
+                    if (String(b, pos, 4) == "data") {
+                        if (size in 1 until 0xFFFFFFFFL) left = size
+                        return take(b, pos + 8)
+                    }
+                    val next = pos + 8 + size + (size and 1)
+                    if (next > b.size) break
+                    pos = next.toInt()
+                }
+                started = false // header not complete yet; wait for more
+                return ByteArray(0)
+            }
+            return take(bytes, 0)
+        }
+
+        private fun take(b: ByteArray, from: Int): ByteArray {
+            val n = minOf((b.size - from).toLong(), left).toInt().coerceAtLeast(0)
+            left -= n
+            return b.copyOfRange(from, from + n)
+        }
+    }
+
     /** Audio bytes (16-bit mono PCM at [RATE]) in a response. */
     private fun audioOf(r: GenerateContentResponse): List<ByteArray> =
         r.candidates.flatMap { c -> c.content.parts.filterIsInstance<InlineDataPart>().map { it.inlineData } }
@@ -88,7 +130,8 @@ object CloudVoice {
     /** Gemini reads [text] into memory without playing it: 16-bit mono PCM at [RATE_HZ]. Needs internet. */
     suspend fun record(text: String): ByteArray {
         val out = java.io.ByteArrayOutputStream()
-        withTimeout(60_000) { audioOf(model.generateContent(prompt(text))).forEach { out.write(it) } }
+        val samples = WavSamples()
+        withTimeout(60_000) { audioOf(model.generateContent(prompt(text))).forEach { out.write(samples.feed(it)) } }
         if (out.size() == 0) error("no audio came back")
         return out.toByteArray()
     }
@@ -106,10 +149,11 @@ object CloudVoice {
         track = t
         try {
             var frames = 0L
+            val samples = WavSamples()
             withTimeout(45_000) {
                 // Plays each piece of audio as it arrives.
                 model.generateContentStream(prompt(text)).collect { r ->
-                    audioOf(r).forEach { pcm ->
+                    audioOf(r).map(samples::feed).filter { it.isNotEmpty() }.forEach { pcm ->
                         if (t.playState != AudioTrack.PLAYSTATE_PLAYING) t.play()
                         t.write(pcm, 0, pcm.size)
                         frames += pcm.size / 2
