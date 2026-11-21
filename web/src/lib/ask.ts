@@ -10,13 +10,16 @@ import { doc, getDocs, setDoc } from "firebase/firestore";
 import { fbNow } from "./firebase";
 import { CLOUD_TEXT_MODEL } from "./config";
 import { Lang, TH, EN, MY } from "./lang";
-import { captionsOf, caption, pairFor, updateCaption } from "./state";
+import { app, captionsOf, caption, pairFor, updateCaption } from "./state";
 import { askCol, audioBlob } from "./store";
 import { base64 } from "./audio";
 import { USER_UNDO, correctionOf, searchText, type Caption, type Revision } from "./types";
 
 export type Role = "USER" | "AI";
-export interface Msg { role: Role; text: string; steps?: string[]; error?: boolean }
+/** source: which model wrote an answer, e.g. "cloud · gemini…" or "on-device · Gemini Nano". */
+export interface Msg { role: Role; text: string; steps?: string[]; error?: boolean; source?: string }
+/** Cloud Gemini (tools, listening, web) or Gemini Nano in Chrome (reads the text only, works offline). */
+export type Engine = "cloud" | "nano";
 export interface Thread { id: number; title: string; updated: number; messages: Msg[] }
 
 interface AskState {
@@ -26,8 +29,9 @@ interface AskState {
   busy: boolean;
   activity: string;
   liveSteps: string[];
+  engine: Engine;
 }
-export const useAsk = create<AskState>(() => ({ messages: [], threads: [], currentThread: null, busy: false, activity: "", liveSteps: [] }));
+export const useAsk = create<AskState>(() => ({ messages: [], threads: [], currentThread: null, busy: false, activity: "", liveSteps: [], engine: "cloud" }));
 const st = () => useAsk.getState();
 const set = (p: Partial<AskState>) => useAsk.setState(p);
 
@@ -137,6 +141,9 @@ export async function forProject(id: string | null) {
 }
 
 export function newChat() { show(null); }
+export function setEngine(engine: Engine) { if (!st().busy) set({ engine }); }
+/** Nano only when chosen and Chrome still has it ready; otherwise cloud. */
+export const usingNano = () => st().engine === "nano" && app().nanoReady;
 export function openThread(threadId: number) {
   if (st().busy || threadId === st().currentThread) return;
   const t = st().threads.find((x) => x.id === threadId);
@@ -190,6 +197,7 @@ export async function ask(question: string) {
   if (st().currentThread == null) set({ currentThread: Date.now() });
   set({ messages: [...st().messages, { role: "USER", text: q }] });
   persist();
+  if (usingNano()) return askNano(gen, q, before);
   if (!navigator.onLine) {
     reply(gen, { role: "AI", text: "Ask needs the internet. Your recordings are safe; ask again when you're back online.", error: true });
     return;
@@ -215,11 +223,83 @@ export async function ask(question: string) {
     }
     let text = "";
     try { text = response.text().trim(); } catch { /* blocked */ }
-    reply(gen, { role: "AI", text: text || "I couldn't come up with an answer. Try asking another way.", steps: [...steps] });
+    reply(gen, { role: "AI", text: text || "I couldn't come up with an answer. Try asking another way.", steps: [...steps], source: `cloud · ${CLOUD_TEXT_MODEL}` });
   } catch (e) {
     if (gen === generation) chat = null;
     reply(gen, { role: "AI", text: `Something went wrong: ${String((e as Error)?.message ?? e).slice(0, 160)}`, steps: [...steps], error: true });
   } finally {
+    set({ busy: false, activity: "", liveSteps: [] });
+  }
+}
+
+// ---------- Gemini Nano (Chrome's Prompt API) ----------
+
+interface NanoSession { prompt(input: string): Promise<string>; destroy(): void }
+interface NanoStatic { create(o?: Record<string, unknown>): Promise<NanoSession> }
+type NanoPrompt = { role: "system" | "user" | "assistant"; content: string };
+
+const NANO_PIECES = 150;
+const NANO_CHARS = 12_000;
+const NANO_TURNS = 6;
+
+const NANO_SYSTEM = `You are the assistant inside LinguaLocal, a live interpreter used by people living in Thailand.
+Below is the transcript of the conversation the user is asking about: one line per piece, with time, speaker,
+spoken language, what was heard and its translation. Answer short and practical in the language the user writes in.
+Refer to pieces by their time. Only use what the transcript shows; if it doesn't show something, say so.
+You can't hear the recordings or search the web.`;
+
+/** Newest pieces that fit Nano's small context, oldest first. */
+function nanoLines(list: Caption[], max: number): string[] {
+  const out: string[] = [];
+  let chars = 0;
+  for (let i = list.length - 1; i >= 0 && out.length < max; i--) {
+    const c = list[i];
+    const who = c.mine ? "you" : c.speaker != null ? `voice ${c.speaker}` : "someone";
+    const body = c.turns.length
+      ? c.turns.map((t) => `${t.speaker}: ${t.heard} => ${t.translation}`).join(" / ")
+      : `${c.heard.slice(0, MAX_TEXT)} => ${c.translation.slice(0, MAX_TEXT)}`;
+    const line = `${clock(c.time)} ${who}${c.lang.trim() ? ` (${c.lang})` : ""}: ${body}`;
+    if (chars + line.length > NANO_CHARS && out.length) break;
+    chars += line.length + 1;
+    out.unshift(line);
+  }
+  return out;
+}
+
+/** Ask on Gemini Nano: the latest transcript text and the chat so far, no tools. Free, private, works offline. */
+async function askNano(gen: number, q: string, before: Msg[]) {
+  const LM = (globalThis as unknown as { LanguageModel?: NanoStatic }).LanguageModel;
+  set({ busy: true, liveSteps: [], activity: "Loading Gemini Nano…" });
+  const steps: string[] = [];
+  let session: NanoSession | null = null;
+  try {
+    if (!LM) throw new Error("Gemini Nano isn't available in this browser");
+    const all = pieces().filter((c) => c.heard.trim() || c.turns.length);
+    const turns = history(before).slice(-NANO_TURNS * 2)
+      .map((c): NanoPrompt => ({ role: c.role === "model" ? "assistant" : "user", content: c.parts.map((p) => ("text" in p ? p.text : "")).join("") }));
+    // Shrink the transcript until Chrome accepts it; Nano's context is only a few pages.
+    for (let max = NANO_PIECES; ; max = Math.floor(max / 2)) {
+      const lines = nanoLines(all, max);
+      const text = lines.length ? lines.join("\n") : "The project has no recordings yet.";
+      try {
+        session = await LM.create({ initialPrompts: [{ role: "system", content: `${NANO_SYSTEM}\n\nTranscript:\n${text}` }, ...turns] });
+        steps.push(lines.length < all.length ? `Read the latest ${lines.length} of ${all.length} pieces` : "Read the transcript");
+        break;
+      } catch (e) {
+        if (max < 10 || (e as Error)?.name !== "QuotaExceededError") throw e;
+      }
+    }
+    set({ liveSteps: [...steps], activity: "Thinking…" });
+    const text = (await session.prompt(q)).trim();
+    reply(gen, { role: "AI", text: text || "I couldn't come up with an answer. Try asking another way.", steps, source: "on-device · Gemini Nano" });
+  } catch (e) {
+    const tooLong = (e as Error)?.name === "QuotaExceededError";
+    reply(gen, {
+      role: "AI", steps, error: true,
+      text: tooLong ? "That's too long for Gemini Nano. Start a new chat or switch to Cloud." : `Something went wrong: ${String((e as Error)?.message ?? e).slice(0, 160)}`,
+    });
+  } finally {
+    session?.destroy();
     set({ busy: false, activity: "", liveSteps: [] });
   }
 }

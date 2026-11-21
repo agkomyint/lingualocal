@@ -12,6 +12,8 @@ export interface AppState {
   liveStatus: string;
   vadStatus: string;
   nanoStatus: string;
+  /** Gemini Nano is downloaded and usable in this browser (Chrome only). */
+  nanoReady: boolean;
   offlineStatus: string;
   speakerStatus: string;
   pushToTalkStatus: string;
@@ -42,7 +44,7 @@ export interface AppState {
 
 export const useApp = create<AppState>(() => ({
   running: false, source: "MIC", runningSource: "MIC",
-  liveStatus: "Idle", vadStatus: "Not loaded", nanoStatus: "Checking…", offlineStatus: "Checking…",
+  liveStatus: "Idle", vadStatus: "Not loaded", nanoStatus: "Checking…", nanoReady: false, offlineStatus: "Checking…",
   speakerStatus: "Not loaded", pushToTalkStatus: "Checking…",
   micLevel: 0, vadProbability: 0, speechActive: false, waveform: [], bufferedBytes: 0, inputGain: 1,
   speakAloud: true, pushToTalk: false, ttsSpeaking: false, session: 0,

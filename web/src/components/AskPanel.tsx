@@ -3,15 +3,17 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { History, Plus, Send, Sparkles, X } from "lucide-react";
 import { cn } from "@/lib/cn";
-import { useAsk, ask, newChat, openThread, type Msg, type Thread } from "@/lib/ask";
+import { useAsk, ask, newChat, openThread, setEngine, type Engine, type Msg, type Thread } from "@/lib/ask";
+import { useApp } from "@/lib/state";
 import { dMon, hm } from "@/lib/format";
 import { Spinner } from "./ui";
 
+/** cloud: needs cloud Gemini (listens to recordings), so it's off on Nano. */
 const suggestions = [
-  "Summarise this conversation",
-  "What was their tone? Listen to the recordings",
-  "Check the transcripts against the recordings and fix mistakes",
-  "What should I reply in Thai?",
+  { text: "Summarise this conversation" },
+  { text: "What was their tone? Listen to the recordings", cloud: true },
+  { text: "Check the transcripts against the recordings and fix mistakes", cloud: true },
+  { text: "What should I reply in Thai?" },
 ];
 
 function useOnline() {
@@ -26,10 +28,13 @@ function useOnline() {
 }
 
 export function AskPanel({ onClose, className }: { onClose: () => void; className?: string }) {
-  const { messages, busy, activity, liveSteps, threads, currentThread } = useAsk();
+  const { messages, busy, activity, liveSteps, threads, currentThread, engine } = useAsk();
+  const nanoReady = useApp((s) => s.nanoReady);
+  const nano = nanoReady && engine === "nano";
   const [showChats, setShowChats] = useState(false);
   const [input, setInput] = useState("");
   const online = useOnline();
+  const usable = online || nano;
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -50,8 +55,8 @@ export function AskPanel({ onClose, className }: { onClose: () => void; classNam
         <div className="flex h-8 w-8 items-center justify-center rounded-full bg-selected"><Sparkles size={18} className="text-english" /></div>
         <div className="ml-2.5 flex-1">
           <div className="text-[16px] font-semibold text-text">Ask</div>
-          <div className={cn("text-[12px]", online ? "text-faint" : "text-thai")}>
-            {online ? "Gemini · reads and listens to this project" : "Offline · needs internet"}
+          <div className={cn("text-[12px]", usable ? "text-faint" : "text-thai")}>
+            {nano ? "Gemini Nano · on this device, reads the text" : online ? "Gemini · reads and listens to this project" : "Offline · needs internet"}
           </div>
         </div>
         {threads.length > 0 && (
@@ -71,6 +76,7 @@ export function AskPanel({ onClose, className }: { onClose: () => void; classNam
         </button>
       </div>
       <div className="h-px w-full bg-line" />
+      {nanoReady && !showChats && <EngineSwitch engine={engine} busy={busy} />}
 
       {showChats ? (
         <ChatList threads={threads} current={currentThread} onOpen={(id) => { openThread(id); setShowChats(false); }} />
@@ -84,9 +90,9 @@ export function AskPanel({ onClose, className }: { onClose: () => void; classNam
               </p>
               <div className="mt-3.5 flex flex-wrap gap-2">
                 {suggestions.map((s) => (
-                  <button key={s} disabled={!online || busy} onClick={() => send(s)}
+                  <button key={s.text} disabled={!usable || busy || (nano && s.cloud)} onClick={() => send(s.text)}
                     className="rounded-2xl border border-line-strong bg-raised px-3 py-2 text-left text-[13px] text-english-soft hover:bg-control disabled:opacity-50">
-                    {s}
+                    {s.text}
                   </button>
                 ))}
               </div>
@@ -106,7 +112,7 @@ export function AskPanel({ onClose, className }: { onClose: () => void; classNam
         <textarea
           value={input} rows={1} onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(input); } }}
-          placeholder={online ? "Ask about this conversation…" : "Needs internet"} aria-label="Ask about this conversation"
+          placeholder={usable ? "Ask about this conversation…" : "Needs internet"} aria-label="Ask about this conversation"
           className="field-sizing-content max-h-[132px] min-h-11 flex-1 resize-none rounded-[22px] border border-line-strong bg-raised px-4 py-[11px] text-[15px] text-text caret-english"
         />
         <button type="submit" aria-label="Send" disabled={!canSend}
@@ -114,6 +120,30 @@ export function AskPanel({ onClose, className }: { onClose: () => void; classNam
           <Send size={20} />
         </button>
       </form>
+    </div>
+  );
+}
+
+/** Cloud Gemini or Gemini Nano; shown only when Chrome has Nano ready. */
+function EngineSwitch({ engine, busy }: { engine: Engine; busy: boolean }) {
+  const opt = (e: Engine, label: string) => (
+    <button role="radio" aria-checked={engine === e} disabled={busy} onClick={() => setEngine(e)}
+      className={cn("h-8 rounded-full px-3.5 text-[13px] font-medium disabled:opacity-50",
+        engine === e ? "bg-english text-bg forced-colors:outline-2 forced-colors:outline-solid forced-colors:outline-[Highlight] forced-colors:font-bold" : "text-muted hover:text-text")}>
+      {label}
+    </button>
+  );
+  return (
+    <div className="border-b border-line px-4 py-2.5">
+      <div role="radiogroup" aria-label="Ask model" className="inline-flex rounded-full border border-line-strong bg-raised p-0.5">
+        {opt("cloud", "Cloud")}
+        {opt("nano", "Nano")}
+      </div>
+      {engine === "nano" && (
+        <p className="mt-1.5 text-[12px] leading-[16px] text-faint">
+          Nano reads text only. Switch to Cloud to listen to recordings, fix transcripts or search the web.
+        </p>
+      )}
     </div>
   );
 }
@@ -152,6 +182,7 @@ function AskMessage({ m }: { m: Msg }) {
       <div className={cn("select-text whitespace-pre-wrap break-words text-[15px] leading-[22px]", m.error ? "text-danger" : "text-text")}>
         {markdown(m.text)}
       </div>
+      {m.source && <div className="mt-1 text-[12px] text-faint">— {m.source}</div>}
     </div>
   );
 }

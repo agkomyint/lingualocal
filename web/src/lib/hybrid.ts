@@ -35,7 +35,7 @@ export async function refreshStatus() {
     if (a === "available") nano = "Gemini Nano ready in this browser";
     else if (a === "downloading" || a === "downloadable") nano = "Gemini Nano downloading…";
   } catch (e) { console.warn("Nano check failed", e); }
-  setApp({ nanoStatus: nano });
+  setApp({ nanoStatus: nano, nanoReady });
 
   const T = g().Translator;
   let offline = "Not available in this browser · typed Thai ⇄ English uses the cloud";
