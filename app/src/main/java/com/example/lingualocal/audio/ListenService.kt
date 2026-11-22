@@ -446,7 +446,15 @@ class ListenService : LifecycleService() {
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentTitle("LinguaLocal is listening")
-            .setContentText(if (phone) "Translating phone audio live" else "Translating ${(if (::space.isInitialized) space else AppState.view.value)?.pair?.label.orEmpty()} live")
+            .setContentText(
+                (if (::space.isInitialized) space else AppState.view.value)?.pair.let { pair ->
+                    when {
+                        pair?.transcribeOnly == true -> if (phone) "Writing down phone audio live" else "Writing down Burmese live"
+                        phone -> "Translating phone audio live"
+                        else -> "Translating ${pair?.label.orEmpty()} live"
+                    }
+                }
+            )
             .setOngoing(true)
             .setContentIntent(open)
             .addAction(0, "Stop", stop)

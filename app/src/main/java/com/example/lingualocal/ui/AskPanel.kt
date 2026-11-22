@@ -77,6 +77,8 @@ internal fun AskPanel(onClose: () -> Unit, modifier: Modifier = Modifier) {
     val liveSteps by AskAssistant.liveSteps.collectAsStateWithLifecycle()
     val threads by AskAssistant.threads.collectAsStateWithLifecycle()
     val currentThread by AskAssistant.currentThread.collectAsStateWithLifecycle()
+    val space by com.example.lingualocal.AppState.view.collectAsStateWithLifecycle()
+    val burmeseOnly = space?.pair?.transcribeOnly == true
     var showChats by remember { mutableStateOf(false) }
     val online = remember(messages.size) { AskAssistant.online() }
     val listState = rememberLazyListState()
@@ -146,7 +148,7 @@ internal fun AskPanel(onClose: () -> Unit, modifier: Modifier = Modifier) {
                         )
                         Spacer(Modifier.height(14.dp))
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            suggestions.forEach { s ->
+                            suggestions.map { if (burmeseOnly && "in Thai" in it) "What should I reply in Burmese?" else it }.forEach { s ->
                                 Text(
                                     s, color = LL.EnglishSoft, fontSize = 13.sp,
                                     modifier = Modifier.clip(RoundedCornerShape(16.dp)).background(LL.Raised)

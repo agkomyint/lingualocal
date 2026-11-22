@@ -230,12 +230,13 @@ object AskAssistant {
             mapOf(
                 "id" to Schema.long("The piece id."),
                 "heard" to Schema.string("The corrected transcript, in the language actually spoken (Thai script for Thai, Myanmar Unicode for Burmese)."),
-                "translation" to Schema.string("The corrected translation into the other language of the project's pair."),
+                "translation" to Schema.string("The corrected translation into the other language of the project's pair. " +
+                    "Leave it out for a piece that has no translation in a Burmese only project."),
                 "language" to Schema.enumeration(listOf("th", "en", "my"), "Language actually spoken in the piece (my = Burmese)."),
                 "reason" to Schema.string("Short reason shown to the user, e.g. 'missed the negative ไม่ (don't)'."),
                 "speaker" to Schema.string("Only for pieces with turns: the speaker letter (A, B…) whose turn to correct."),
             ),
-            optionalParameters = listOf("speaker"),
+            optionalParameters = listOf("translation", "speaker"),
         ),
         FunctionDeclaration(
             "web_search",
@@ -253,6 +254,8 @@ object AskAssistant {
                     """
                     You are the assistant inside LinguaLocal, a live interpreter used by people living in Thailand. Each project
                     is either Thai ⇄ English or Thai ⇄ Burmese (read_transcript says which). Write Burmese in Myanmar Unicode script.
+                    A project can also be Burmese only: its pieces are written down as spoken and have no translation. That is how the
+                    user wants them, so don't call a missing translation a mistake or add one, and suggest what to say in Burmese.
                     The user asks about a conversation the app recorded and translated (the open project).
                     Use read_transcript to see it; in long meetings, find earlier parts with search_transcript and read_pieces
                     instead of guessing. When tone, intent, or the exact words matter, use listen_to_recording on the
@@ -397,6 +400,10 @@ object AskAssistant {
         return "${hits.size} matching pieces (best first):\n" + rows(hits.map { it.first }, all.map { it.session }.distinct())
     }
 
+    /** Whether a piece is meant to have no translation (also one with no words yet in a one-language project). */
+    private fun untranslated(c: Caption) =
+        c.textOnly || (c.translation.isBlank() && askSpace()?.pair?.transcribeOnly == true)
+
     private fun rows(list: List<Caption>, sessions: List<Long>): String {
         val rows = list.map { c ->
             JsonObject(
@@ -409,10 +416,10 @@ object AskAssistant {
                     put("speaker", JsonPrimitive(if (c.mine) "the user (push-to-talk)" else c.speaker?.let { "voice $it" } ?: "unknown"))
                     if (c.lang.isNotBlank()) put("language", JsonPrimitive(c.lang))
                     if (c.turns.isNotEmpty()) {
-                        put("turns", JsonArray(c.turns.map { t -> JsonPrimitive("${t.speaker}: ${t.heard} => ${t.translation}") }))
+                        put("turns", JsonArray(c.turns.map { t -> JsonPrimitive("${t.speaker}: ${t.heard}" + if (t.translation.isNotBlank()) " => ${t.translation}" else "") }))
                     } else {
                         put("heard", JsonPrimitive(c.heard.take(MAX_TEXT)))
-                        put("translation", JsonPrimitive(c.translation.take(MAX_TEXT)))
+                        if (c.translation.isNotBlank()) put("translation", JsonPrimitive(c.translation.take(MAX_TEXT)))
                     }
                     put("has_audio", JsonPrimitive(c.audioFile?.let { File(it).isFile } == true))
                 }
@@ -424,14 +431,22 @@ object AskAssistant {
     private suspend fun listen(c: Caption, question: String): String {
         val path = c.audioFile ?: return "This piece has no saved audio."
         val bytes = withContext(Dispatchers.IO) { File(path).takeIf { it.isFile }?.readBytes() } ?: return "The audio file is missing."
+        val only = untranslated(c)
+        // One line each, so trimIndent below still finds the indent.
+        val was = if (only) "" else " Its translation was: \"${c.translation}\""
+        val check = if (only) {
+            "Check the transcript against the audio. It is wanted without a translation. If it is wrong, give the corrected " +
+                "transcript (in the language spoken) and how confident you are (high / medium / low)."
+        } else {
+            "Check the transcript and translation against the audio. If either is wrong, give the corrected transcript (in the " +
+                "language spoken), the corrected translation, and how confident you are (high / medium / low)."
+        }
         val prompt = """
             This is a recording from a conversation in Thailand (${(askSpace()?.pair ?: com.example.lingualocal.data.LangPair.TH_EN).label}, possibly mixed).
-            The app's transcript was: "${c.heard.ifBlank { c.turns.joinToString(" / ") { "${it.speaker}: ${it.heard}" } }}"
-            Its translation was: "${c.translation}"
+            The app's transcript was: "${c.heard.ifBlank { c.turns.joinToString(" / ") { "${it.speaker}: ${it.heard}" } }}"$was
             Listen to the audio itself and answer: ${question.ifBlank { "What is said, by whom, and in what tone?" }}
             Be specific and brief. Quote Thai words with their English meaning.
-            Check the transcript and translation against the audio. If either is wrong, give the corrected transcript (in the
-            language spoken), the corrected translation, and how confident you are (high / medium / low).
+            $check
         """.trimIndent()
         return listener.generateContent(content {
             inlineData(bytes, if (path.endsWith(".wav", true)) "audio/wav" else "audio/mp4")
@@ -444,8 +459,10 @@ object AskAssistant {
         val id = args["id"]?.jsonPrimitive?.longOrNull ?: return "Missing id."
         val c = askSpace()?.caption(id) ?: return "No piece with id $id."
         if (id !in heardIds) return "Listen to piece $id with listen_to_recording before correcting it."
-        val heard = str("heard"); val translation = str("translation")
-        if (heard.isEmpty() || translation.isEmpty()) return "Both heard and translation are required."
+        val only = untranslated(c)
+        val heard = str("heard"); val translation = if (only) "" else str("translation")
+        if (heard.isEmpty()) return "heard is required."
+        if (!only && translation.isEmpty()) return "Both heard and translation are required."
         val lang = str("language").takeIf { it == Lang.TH || it == Lang.EN || it == Lang.MY } ?: Lang.of(heard)
         val reason = str("reason").ifEmpty { "Checked against the recording" }
         val speaker = str("speaker").uppercase()
@@ -462,6 +479,7 @@ object AskAssistant {
         val time = clock.format(Date(c.time))
         activity.value = "Correcting $time…"
         steps += "Corrected $time"
+        if (only) return "Saved. Piece $id now reads \"$heard\". The previous text was \"${c.heard.ifBlank { c.turns.joinToString(" / ") { it.heard } }}\"."
         return "Saved. Piece $id now reads \"$heard\" → \"$translation\". The previous text was \"${c.heard.ifBlank { c.turns.joinToString(" / ") { it.heard } }}\" → \"${c.translation}\"."
     }
 

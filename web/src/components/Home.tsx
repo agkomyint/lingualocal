@@ -6,7 +6,7 @@ import { DropdownMenu } from "radix-ui";
 import { Mic, Plus, Search, Settings as SettingsIcon, MoreVertical } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useApp, setApp, app } from "@/lib/state";
-import { PAIRS, pairOf, langColor } from "@/lib/lang";
+import { MY_ONLY, PAIRS, pairOf, langColor } from "@/lib/lang";
 import { deleteProject, renameProject } from "@/lib/store";
 import * as nav from "@/lib/nav";
 import { ageGroup, dMonYear, hm, length } from "@/lib/format";
@@ -110,22 +110,35 @@ export function PairPicker() {
   const picked = useApp((s) => s.nextPair);
   const first = useApp((s) => s.projects[0]?.pair);
   const current = picked ?? pairOf(first);
+  const only = current.code === MY_ONLY.code;
   return (
-    <div className="flex gap-0.5 rounded-[20px] bg-raised p-[3px]" role="radiogroup" aria-label="Language pair">
-      {PAIRS.map((p) => {
-        const on = p.code === current.code;
-        return (
-          <button
-            key={p.code} role="radio" aria-checked={on} aria-label={p.label}
-            onClick={(e) => { e.stopPropagation(); setApp({ nextPair: p }); }}
-            className={cn("flex h-[34px] items-center rounded-[17px] px-3.5 text-[13px] font-bold", on && "bg-surface")}
-          >
-            <span style={{ color: on ? langColor(p.a) : "var(--ll-faint)" }}>{p.a.toUpperCase()}</span>
-            <span className="font-normal text-faint">&nbsp;⇄&nbsp;</span>
-            <span style={{ color: on ? langColor(p.b) : "var(--ll-faint)" }}>{p.b.toUpperCase()}</span>
-          </button>
-        );
-      })}
+    <div className="flex flex-col items-center gap-1.5" role="radiogroup" aria-label="Language pair">
+      <div className="flex gap-0.5 rounded-[20px] bg-raised p-[3px]">
+        {PAIRS.filter((p) => !p.transcribeOnly).map((p) => {
+          const on = p.code === current.code;
+          return (
+            <button
+              key={p.code} role="radio" aria-checked={on} aria-label={p.label}
+              onClick={(e) => { e.stopPropagation(); setApp({ nextPair: p }); }}
+              className={cn("flex h-[34px] items-center rounded-[17px] px-3.5 text-[13px] font-bold", on && "bg-surface")}
+            >
+              <span style={{ color: on ? langColor(p.a) : "var(--ll-faint)" }}>{p.a.toUpperCase()}</span>
+              <span className="font-normal text-faint">&nbsp;⇄&nbsp;</span>
+              <span style={{ color: on ? langColor(p.b) : "var(--ll-faint)" }}>{p.b.toUpperCase()}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="rounded-[20px] bg-raised p-[3px]">
+        <button
+          role="radio" aria-checked={only} aria-label={`${MY_ONLY.label}, no translation`}
+          onClick={(e) => { e.stopPropagation(); setApp({ nextPair: MY_ONLY }); }}
+          className={cn("flex h-[34px] items-center rounded-[17px] px-3.5 text-[13px] font-bold", only && "bg-surface")}
+        >
+          <span style={{ color: only ? langColor(MY_ONLY.a) : "var(--ll-faint)" }}>{MY_ONLY.label}</span>
+          <span className="font-normal text-faint">&nbsp;· no translation</span>
+        </button>
+      </div>
     </div>
   );
 }

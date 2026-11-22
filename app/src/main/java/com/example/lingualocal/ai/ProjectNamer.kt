@@ -49,7 +49,7 @@ object ProjectNamer {
                         val text = pieces.take(10).joinToString("\n") { c ->
                             val heard = c.heard.ifBlank { c.turns.joinToString(" / ") { it.heard } }
                             val tr = c.translation.ifBlank { c.turns.joinToString(" / ") { it.translation } }
-                            "- $heard => $tr"
+                            if (c.translation.isNotBlank() || c.turns.any { it.translation.isNotBlank() }) "- $heard => $tr" else "- $heard"
                         }.take(2_000)
                         val r = model.generateContent(
                             "Here is the start of a conversation recorded by an interpreter app. Give it a short title " +

@@ -7,7 +7,7 @@ import { create } from "zustand";
 import { Lang } from "./lang";
 import { app, toast } from "./state";
 import { audioBlob } from "./store";
-import { hasDeviceVoice, playBlob, remember, savedVoice, sayOnTap, spokenText, stop as stopSpeaker, stopPlayer, voiceFile, currentPlayer } from "./speak";
+import { alwaysGemini, hasDeviceVoice, playBlob, remember, savedVoice, sayOnTap, spokenText, stop as stopSpeaker, stopPlayer, voiceFile, voiceProblem, currentPlayer } from "./speak";
 import type { Caption } from "./types";
 
 export type PlayMode = "ORIGINAL" | "TRANSLATION";
@@ -117,7 +117,7 @@ async function speak(c: Caption, gen: number) {
     if (b) { await playBlob(b, speed()); return; }
   }
   const lang = Lang.of(text);
-  if (hasDeviceVoice(lang)) {
+  if (!(pid && alwaysGemini(pid, c)) && hasDeviceVoice(lang)) {
     await new Promise<void>((resolve) => {
       const u = new SpeechSynthesisUtterance(text);
       const v = speechSynthesis.getVoices().find((x) => x.lang.toLowerCase().startsWith(Lang.locale(lang).slice(0, 2)));
@@ -134,7 +134,7 @@ async function speak(c: Caption, gen: number) {
   const path = pid ? await voiceFile(pid, c.id) : null;
   if (gen !== generation) return;
   const b = path ? await audioBlob(path) : null;
-  if (!b) { toast(`Couldn't speak ${Lang.name(lang)} (needs internet)`); return; }
+  if (!b) { toast(voiceProblem(pid, c.id)); return; }
   if (gen !== generation) return;
   await playBlob(b, speed());
 }

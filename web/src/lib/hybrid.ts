@@ -115,7 +115,10 @@ In at most 3 short sentences of plain English: explain what the speaker most lik
 
 // ---------- Typed messages ----------
 
-/** A typed message becomes a piece of the project ("You"), translated and saved like spoken ones. */
+/**
+ * A typed message becomes a piece of the project ("You"), translated and saved like spoken ones.
+ * In a one-language project it is read aloud as typed instead.
+ */
 export function sendTyped(pid: string, input: string) {
   const pair = pairFor(pid);
   const listeningHere = liveId() === pid;
@@ -123,9 +126,14 @@ export function sendTyped(pid: string, input: string) {
   // Not listening here: keep typed pieces in the latest session instead of starting one per message.
   const lastSession = [...captionsOf(pid)].reverse().find((c) => c.id !== id)?.session;
   updateCaption(pid, id, (c) => ({
-    ...c, heard: input, lang: Lang.of(input), status: "TRANSLATING",
+    ...c, heard: input, lang: Lang.of(input), status: pair.transcribeOnly ? "DONE" : "TRANSLATING",
     session: listeningHere || lastSession == null ? c.session : lastSession,
   }));
+  if (pair.transcribeOnly) {
+    // Typed here to be heard, so it plays whatever the speaker switch says; the voice is saved with the piece.
+    say(input, String(id));
+    return;
+  }
   (async () => {
     const from = Lang.of(input);
     const to = Lang.other(from, pair);

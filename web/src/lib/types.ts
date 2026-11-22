@@ -62,6 +62,11 @@ export const correctionOf = (c: Caption): Revision | null => {
 
 export const isDone = (c: Caption) => c.status === "DONE" || c.status === "NO_SPEECH" || c.status === "SKIPPED";
 
+/** A finished piece that was only written down (or typed to be read aloud): words, and no translation. */
+export const textOnly = (c: Caption) =>
+  c.status === "DONE" && !c.note && (!!c.heard.trim() || c.turns.length > 0) &&
+  !c.translation.trim() && c.turns.every((t) => !t.translation.trim());
+
 export interface WaveBar {
   level: number;
   speech: boolean;

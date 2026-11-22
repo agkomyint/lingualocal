@@ -46,21 +46,25 @@ export interface LangPair {
   b: string;
   label: string;
   short: string;
+  /** One language (a === b): speech is written down and typed text is read aloud, nothing is translated. */
+  transcribeOnly: boolean;
   /** Only Thai ⇄ English can be translated on the device (Chrome's built-in translator, typed text). */
   worksOffline: boolean;
 }
 
 const make = (code: string, a: string, b: string): LangPair => ({
   code, a, b,
-  label: `${Lang.name(a)} ⇄ ${Lang.name(b)}`,
-  short: `${a.toUpperCase()} ⇄ ${b.toUpperCase()}`,
+  label: a === b ? `${Lang.name(a)} only` : `${Lang.name(a)} ⇄ ${Lang.name(b)}`,
+  short: a === b ? a.toUpperCase() : `${a.toUpperCase()} ⇄ ${b.toUpperCase()}`,
+  transcribeOnly: a === b,
   worksOffline: code === "th-en",
 });
 
 export const TH_EN = make("th-en", TH, EN);
 export const TH_MY = make("th-my", TH, MY);
 export const EN_MY = make("en-my", EN, MY);
-export const PAIRS = [TH_EN, TH_MY, EN_MY];
+export const MY_ONLY = make("my", MY, MY);
+export const PAIRS = [TH_EN, TH_MY, EN_MY, MY_ONLY];
 export const pairOf = (code?: string | null): LangPair => PAIRS.find((p) => p.code === code) ?? TH_EN;
 
 /** Language colours from the theme. */

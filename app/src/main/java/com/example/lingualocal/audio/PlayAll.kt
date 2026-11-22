@@ -51,8 +51,7 @@ object PlayAll {
         PlayMode.TRANSLATION -> spokenText(c).isNotBlank()
     }
 
-    private fun spokenText(c: Caption) =
-        if (c.turns.isNotEmpty()) c.turns.joinToString(" ") { it.translation }.trim() else c.translation.trim()
+    private fun spokenText(c: Caption) = c.spokenText
 
     /** Starts playing [items] in order, from [fromId] if given. */
     fun start(items: List<Caption>, fromId: Long? = null) {
@@ -85,6 +84,15 @@ object PlayAll {
             player = playFile(f, onEnd = { if (saying.value == key) saying.value = null })
             if (player == null) saying.value = null else return
         }
+        key.toLongOrNull()?.let { id ->
+            val space = com.example.lingualocal.AppState.view.value ?: return@let
+            val c = space.caption(id) ?: return@let
+            if (!TranslationVoice.alwaysGemini(space, c)) return@let
+            Speaker.remember(text)
+            saying.value = key
+            sayWithGemini(id, key, com.example.lingualocal.data.Lang.of(text))
+            return
+        }
         val engine = tts
         if (engine == null || !ttsReady) {
             saying.value = key
@@ -104,13 +112,7 @@ object PlayAll {
                 com.example.lingualocal.ai.CloudVoice.speak(text, onFail = { failedVoice(lang) }, onDone = { if (saying.value == key) saying.value = null })
                 return
             }
-            voiceScope.launch {
-                val f = com.example.lingualocal.AppState.view.value?.let { TranslationVoice.voiceFile(it, id) }
-                if (saying.value != key) return@launch
-                if (f == null) { failedVoice(lang); saying.value = null; return@launch }
-                player = playFile(f, onEnd = { if (saying.value == key) saying.value = null })
-                if (player == null) saying.value = null
-            }
+            sayWithGemini(id, key, lang)
             return
         }
         Speaker.remember(text)
@@ -121,6 +123,27 @@ object PlayAll {
     }
 
     private val voiceScope = kotlinx.coroutines.MainScope()
+
+    private fun sayWithGemini(id: Long, key: String, lang: String) {
+        voiceScope.launch {
+            val f = com.example.lingualocal.AppState.view.value?.let { TranslationVoice.voiceFile(it, id) }
+            if (saying.value != key) return@launch
+            if (f == null) { failedVoice(lang); saying.value = null; return@launch }
+            player = playFile(f, onEnd = { if (saying.value == key) saying.value = null })
+            if (player == null) saying.value = null
+        }
+    }
+
+    private fun speakWithGemini(c: Caption, gen: Int, lang: String) {
+        // Made once by Gemini and saved, so playing again later is free.
+        voiceScope.launch {
+            val f = com.example.lingualocal.AppState.view.value?.let { TranslationVoice.voiceFile(it, c.id) }
+            if (gen != generation) return@launch
+            if (f == null) { failedVoice(lang); advance(gen); return@launch }
+            player = playFile(f, onEnd = { advance(gen) }, rate = speed())
+            if (player == null) advance(gen)
+        }
+    }
 
     fun stop() {
         generation++
@@ -205,6 +228,12 @@ object PlayAll {
             player = playFile(f, onEnd = { advance(gen) }, rate = speed())
             if (player != null) return
         }
+        val space = com.example.lingualocal.AppState.view.value
+        if (space != null && TranslationVoice.alwaysGemini(space, c)) {
+            Speaker.remember(text)
+            speakWithGemini(c, gen, com.example.lingualocal.data.Lang.of(text))
+            return
+        }
         val engine = tts
         if (engine == null || !ttsReady) {
             // First use: start the voice, then speak this piece.
@@ -217,14 +246,7 @@ object PlayAll {
         Speaker.remember(text)
         val lang = com.example.lingualocal.data.Lang.of(text)
         if (engine.setLanguage(com.example.lingualocal.data.Lang.locale(lang)) < TextToSpeech.LANG_AVAILABLE) {
-            // Made once by Gemini and saved, so playing again later is free.
-            voiceScope.launch {
-                val f = com.example.lingualocal.AppState.view.value?.let { TranslationVoice.voiceFile(it, c.id) }
-                if (gen != generation) return@launch
-                if (f == null) { failedVoice(lang); advance(gen); return@launch }
-                player = playFile(f, onEnd = { advance(gen) }, rate = speed())
-                if (player == null) advance(gen)
-            }
+            speakWithGemini(c, gen, lang)
             return
         }
         engine.setAudioAttributes(SegmentAudio.playbackAttributes())

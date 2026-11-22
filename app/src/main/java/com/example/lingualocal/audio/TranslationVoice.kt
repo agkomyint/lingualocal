@@ -15,7 +15,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.launch
@@ -32,6 +31,7 @@ import kotlin.coroutines.resume
  * so projects can be listened to offline later. Thai/English use the phone's voice (free, offline);
  * languages it has no voice for (Burmese) use Gemini's voice and wait for internet.
  * A translation that changes later gets a new recording.
+ * In a one-language project every piece, typed or spoken, is saved in Gemini's voice.
  */
 object TranslationVoice {
     private const val TAG = "TranslationVoice"
@@ -45,34 +45,51 @@ object TranslationVoice {
     private val pending = ConcurrentHashMap<String, (Boolean) -> Unit>()
     /** caption id + text -> when it last failed, so a missing connection isn't retried every second. */
     private val failed = ConcurrentHashMap<String, Long>()
+    private val tries = ConcurrentHashMap<String, Int>()
+    /** One-language pieces seen unfinished or recent: voiced when they can be, however late that is. */
+    private val due = HashSet<String>()
+    private const val MAX_LATE_TRIES = 5
 
     fun init(context: Context) {
         appContext = context.applicationContext
         scope.launch {
             while (true) {
+                val before = changes().first()
                 runCatching { catchUp() }.onFailure { Log.w(TAG, "catch-up failed: $it") }
-                // Run again when the pieces change, or every two minutes to retry ones that needed internet.
-                withTimeoutOrNull(RETRY_MS) { changes().drop(1).first() }
+                // Run again when the pieces change (also while voices were being made), or every two minutes to retry.
+                withTimeoutOrNull(RETRY_MS) { changes().first { it != before } }
                 delay(1_500)
             }
         }
     }
 
-    /** The projects worth voicing now: the one being recorded and the one on screen (often the same). */
-    private fun spaces() = listOfNotNull(AppState.live.value, AppState.view.value).distinct()
+    /** The projects worth voicing now: recorded, on screen, and one-language ones just left. */
+    private fun spaces() = (listOfNotNull(AppState.live.value, AppState.view.value) +
+        ProjectStore.openSpaces().filter { it.pair.transcribeOnly }).distinct()
 
     /** Emits whenever the pieces of those projects change. */
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    private fun changes(): kotlinx.coroutines.flow.Flow<Any> =
-        kotlinx.coroutines.flow.combine(AppState.live, AppState.view) { a, b -> listOfNotNull(a, b).distinct() }
-            .flatMapLatest { ss -> if (ss.isEmpty()) kotlinx.coroutines.flow.flow { kotlinx.coroutines.awaitCancellation() } else kotlinx.coroutines.flow.merge(*ss.map { it.captions }.toTypedArray()) }
+    private fun changes(): kotlinx.coroutines.flow.Flow<List<List<Caption>>> =
+        kotlinx.coroutines.flow.combine(AppState.live, AppState.view) { _, _ -> spaces() }
+            .flatMapLatest { ss ->
+                if (ss.isEmpty()) kotlinx.coroutines.flow.flowOf(emptyList())
+                else kotlinx.coroutines.flow.combine(ss.map { it.captions }) { it.toList() }
+            }
+
+    private fun online(): Boolean {
+        val cm = appContext.getSystemService(android.net.ConnectivityManager::class.java) ?: return true
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
 
     /** The saved voice for [c], if it was made from [text] (the translation as it is now). */
     fun saved(c: Caption, text: String): String? =
         c.voiceFile?.takeIf { c.voiceText == text.trim() && File(it).isFile }
 
-    fun spokenText(c: Caption): String =
-        if (c.turns.isNotEmpty()) c.turns.joinToString(" ") { it.translation }.trim() else c.translation.trim()
+    fun spokenText(c: Caption): String = c.spokenText
+
+    /** A piece of a one-language project: always Gemini's voice, even where the phone has one. */
+    fun alwaysGemini(project: ProjectSpace, c: Caption): Boolean = c.textOnly && project.pair.transcribeOnly
 
     /** Cards already found with their voice saved (same object = unchanged), so long projects aren't rescanned. */
     private val checkedBy = HashMap<String, HashMap<Long, Caption>>()
@@ -87,8 +104,13 @@ object TranslationVoice {
         val checked = checkedBy.getOrPut(project.id) { HashMap() }
         for (c in project.captions.value) {
             if (checked[c.id] === c) continue
+            val recent = c.time >= System.currentTimeMillis() - CATCH_UP_WINDOW_MS
+            val k = "${project.id}|${c.id}"
+            if (project.pair.transcribeOnly && (recent || c.status != SegmentStatus.DONE)) due += k
             if (c.status != SegmentStatus.DONE) continue
-            if (c.time < System.currentTimeMillis() - CATCH_UP_WINDOW_MS) { checked[c.id] = c; continue }
+            if (!recent && !(k in due && (tries["$k|${spokenText(c).hashCode()}"] ?: 0) < MAX_LATE_TRIES)) { checked[c.id] = c; continue }
+            // Untranslated speech in a translation project isn't paid for.
+            if (c.source != Caption.SOURCE_TYPED && c.textOnly && !alwaysGemini(project, c)) continue
             val text = spokenText(c)
             if (text.isBlank()) continue
             val have = saved(c, text)
@@ -98,6 +120,8 @@ object TranslationVoice {
                 continue
             }
             if ((failed["${project.id}|${c.id}|${text.hashCode()}"] ?: 0L) > System.currentTimeMillis() - RETRY_MS) continue
+            // Waiting for internet isn't a failed try.
+            if (alwaysGemini(project, c) && !online()) continue
             ensure(c.id, text, project)
         }
     }
@@ -109,12 +133,17 @@ object TranslationVoice {
     private suspend fun ensure(id: Long, text: String, project: ProjectSpace): File? {
         project.caption(id)?.let { c -> saved(c, text) }?.let { return File(it) }
         val key = "${project.id}|$id|${text.hashCode()}"
+        val gemini = project.caption(id)?.let { alwaysGemini(project, it) } == true
         val job = inFlight.getOrPut(key) {
             scope.async {
                 try {
                     val dir = ProjectStore.audioDir(project)
-                    val file = runCatching { make(text, dir, id) }.onFailure { Log.w(TAG, "piece $id: $it") }.getOrNull()
-                    if (file == null) { failed[key] = System.currentTimeMillis(); return@async null }
+                    val file = runCatching { make(text, dir, id, gemini) }.onFailure { Log.w(TAG, "piece $id: $it") }.getOrNull()
+                    if (file == null) {
+                        failed[key] = System.currentTimeMillis()
+                        tries.merge(key, 1, Int::plus)
+                        return@async null
+                    }
                     // The translation may have changed (or the piece gone) while this was being made.
                     val now = project.caption(id)
                     if (now == null || spokenText(now) != text) { file.delete(); return@async null }
@@ -191,9 +220,9 @@ object TranslationVoice {
     }
 
     /** Speaks [text] into a compressed file in [dir] (AAC .m4a; WAV only if the encoder fails). */
-    private suspend fun make(text: String, dir: File, id: Long): File {
+    private suspend fun make(text: String, dir: File, id: Long, gemini: Boolean): File {
         val lang = Lang.of(text)
-        val engine = engine()
+        val engine = if (gemini) null else engine()
         if (engine != null && engine.setLanguage(Lang.locale(lang)) >= TextToSpeech.LANG_AVAILABLE) {
             engine.setSpeechRate(1f)
             val tmp = File(dir, "segment_${id}_voice.tmp")
@@ -201,7 +230,7 @@ object TranslationVoice {
                 if (toFile(engine, text, tmp)) readWav(tmp)?.let { (pcm, rate) -> return store(pcm, rate, dir, id) }
             } finally { tmp.delete() }
         }
-        // No phone voice for this language: Gemini's voice (needs internet).
+        // A one-language project, or no phone voice for this language: Gemini's voice (needs internet).
         return store(CloudVoice.record(text), CloudVoice.RATE_HZ, dir, id)
     }
 

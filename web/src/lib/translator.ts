@@ -1,6 +1,7 @@
 "use client";
 /**
- * Translates every speech piece on its own: one Gemini request per piece with its recording as audio.
+ * Translates every speech piece on its own (or only writes it down, in a one-language project): one Gemini
+ * request per piece with its recording as audio.
  * Pieces run in parallel (3 at a time); a failed request is retried until it works (e.g. when the internet
  * is back). Port of SegmentTranslator.kt. The web has no on-device speech recognition, so without internet
  * pieces wait.
@@ -21,11 +22,12 @@ const models = new Map<string, GenerativeModel>();
 function model(pair: LangPair): GenerativeModel {
   let m = models.get(pair.code);
   if (!m) {
+    const translation = pair.transcribeOnly ? undefined : { translation: Schema.string({ description: "Translation into the other language" }) };
     const line = Schema.object({
       properties: {
         speaker: Schema.string({ description: "A, B, C… in order of first appearance in this recording" }),
         transcript: Schema.string({ description: "What this person said, in the original language" }),
-        translation: Schema.string({ description: "Translation into the other language" }),
+        ...translation,
         start: Schema.number({ description: "Second in this recording where this turn starts, e.g. 0.0 or 2.4" }),
         end: Schema.number({ description: "Second in this recording where this turn ends" }),
       },
@@ -40,7 +42,7 @@ function model(pair: LangPair): GenerativeModel {
           properties: {
             language: Schema.enumString({ enum: ["th", "en", "my", "none"], description: "Main language spoken" }),
             transcript: Schema.string({ description: "Exactly what was said, in the original language" }),
-            translation: Schema.string({ description: "Translation into the other language" }),
+            ...translation,
             turns: Schema.array({ items: line, description: "Who said what, in order. A single turn if only one person speaks." }),
           },
         }),
@@ -64,10 +66,13 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 class Blocked extends Error {}
 
-function reason(e: unknown): [string, boolean] {
+const whenBack = (pair: LangPair) =>
+  pair.transcribeOnly ? "will write it down when it's back" : "will translate when it's back";
+
+function reason(e: unknown, pair: LangPair): [string, boolean] {
   const err = e as { message?: string; code?: string; customErrorData?: { status?: number } };
   const msg = `${err?.message ?? ""} ${err?.code ?? ""} ${err?.customErrorData?.status ?? ""}`.toLowerCase();
-  if (!navigator.onLine) return ["Waiting for internet · will translate when it's back", false];
+  if (!navigator.onLine) return [`Waiting for internet · ${whenBack(pair)}`, false];
   if (msg.includes("app check") || msg.includes("appcheck") || msg.includes("403") || msg.includes("permission_denied") || msg.includes("unauthenticated"))
     return ["Blocked by Firebase App Check · check the app's App Check setup", true];
   if (msg.includes("quota") || msg.includes("429") || msg.includes("resource_exhausted")) return ["Gemini quota reached · retrying", true];
@@ -86,8 +91,8 @@ export function submit(pid: string, pair: LangPair, id: number, pcm: Uint8Array,
         if (!caption(pid, id)) return; // project deleted
         if (!navigator.onLine) {
           const note = pair.worksOffline
-            ? "Waiting for internet · will translate when it's back"
-            : `${Lang.name(pair.b)} needs internet · will translate when it's back`;
+            ? `Waiting for internet · ${whenBack(pair)}`
+            : `${Lang.name(pair.b)} needs internet · ${whenBack(pair)}`;
           updateCaption(pid, id, (c) => ({ ...c, status: "QUEUED", note }));
           await Promise.race([sleep(backoff), new Promise((r) => window.addEventListener("online", r, { once: true }))]);
           backoff = Math.min(backoff * 2, 15_000);
@@ -98,7 +103,7 @@ export function submit(pid: string, pair: LangPair, id: number, pcm: Uint8Array,
             updateCaption(pid, id, (c) => ({ ...c, status: "TRANSLATING" }));
             const r = await model(pair).generateContent([
               { inlineData: { data: base64(wav(pcm)), mimeType: "audio/wav" } },
-              { text: "Transcribe and translate this piece of speech." },
+              { text: pair.transcribeOnly ? "Transcribe this piece of speech. Don't translate it." : "Transcribe and translate this piece of speech." },
             ]);
             const res = r.response;
             const fin = res.candidates?.[0]?.finishReason;
@@ -106,14 +111,14 @@ export function submit(pid: string, pair: LangPair, id: number, pcm: Uint8Array,
               throw new Blocked();
             return JSON.parse(res.text() || "{}");
           });
-          apply(pid, id, json, pcm, voicedMs);
+          apply(pid, pair, id, json, pcm, voicedMs);
           return;
         } catch (e) {
           if (e instanceof Blocked) {
             updateCaption(pid, id, (c) => ({ ...c, status: "NO_SPEECH", note: "Gemini wouldn't process this piece" }));
             return;
           }
-          const [note, permanent] = reason(e);
+          const [note, permanent] = reason(e, pair);
           console.warn(`#${id} translate failed`, e);
           updateCaption(pid, id, (c) => ({ ...c, status: "QUEUED", note }));
           await sleep(backoff);
@@ -128,16 +133,17 @@ export function submit(pid: string, pair: LangPair, id: number, pcm: Uint8Array,
 
 type Timed = { turn: Turn; start: number; end: number };
 
-function apply(pid: string, id: number, json: Record<string, unknown>, pcm: Uint8Array, voicedMs: number) {
+function apply(pid: string, pair: LangPair, id: number, json: Record<string, unknown>, pcm: Uint8Array, voicedMs: number) {
   const language = String(json.language ?? "");
   const transcript = String(json.transcript ?? "").trim();
-  const translation = String(json.translation ?? "").trim();
-  const words = language !== "none" && !!transcript && !!translation;
+  const only = pair.transcribeOnly;
+  const translation = only ? "" : String(json.translation ?? "").trim();
+  const words = language !== "none" && !!transcript && (only || !!translation);
   const timed: Timed[] = (Array.isArray(json.turns) ? json.turns : []).flatMap((o: Record<string, unknown>) => {
     const heard = String(o?.transcript ?? "").trim();
     if (!heard) return [];
     return [{
-      turn: { speaker: String(o.speaker ?? "").trim() || "?", heard, translation: String(o.translation ?? "").trim(), lang: Lang.of(heard) },
+      turn: { speaker: String(o.speaker ?? "").trim() || "?", heard, translation: only ? "" : String(o.translation ?? "").trim(), lang: Lang.of(heard) },
       start: typeof o.start === "number" ? o.start : -1, end: typeof o.end === "number" ? o.end : -1,
     }];
   });
@@ -152,7 +158,8 @@ function apply(pid: string, id: number, json: Record<string, unknown>, pcm: Uint
     : { ...c, heard: "", translation: "", note: null, status: "NO_SPEECH" });
   if (words) {
     identifyPeople(pid, id, pcm, voicedMs, split.length ? timed : []);
-    say(translation, `seg-${id}`);
+    // A transcript is never read out by itself: the mic would hear it.
+    if (!only) say(translation, `seg-${id}`);
   }
 }
 

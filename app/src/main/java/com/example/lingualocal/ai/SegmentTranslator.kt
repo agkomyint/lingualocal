@@ -41,7 +41,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Translates every speech segment on its own: one request per segment (Firebase AI Logic, Gemini),
+ * Translates every speech segment on its own (or only writes it down, in a one-language project): one request per segment (Firebase AI Logic, Gemini),
  * with the segment's recording as audio. Each card gets exactly the transcript and translation of
  * its own audio. Segments run in parallel, so a slow one never holds up the next. A failed request
  * is retried until it succeeds (e.g. after the network comes back), so every piece gets translated.
@@ -60,13 +60,14 @@ class SegmentTranslator(
     private fun model(pair: LangPair) = models.getOrPut(pair) { buildModel(pair) }
 
     private fun buildModel(pair: LangPair): GenerativeModel {
+        val translation = if (pair.transcribeOnly) emptyMap()
+            else mapOf("translation" to Schema.string("Translation into the other language"))
         val line = mapOf(
             "speaker" to Schema.string("A, B, C… in order of first appearance in this recording"),
             "transcript" to Schema.string("What this person said, in the original language"),
-            "translation" to Schema.string("Translation into the other language"),
             "start" to Schema.double("Second in this recording where this turn starts, e.g. 0.0 or 2.4"),
             "end" to Schema.double("Second in this recording where this turn ends"),
-        )
+        ) + translation
         return Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel(
             modelName = Config.SEGMENT_MODEL,
             generationConfig = generationConfig {
@@ -78,9 +79,8 @@ class SegmentTranslator(
                     mapOf(
                         "language" to Schema.enumeration(listOf("th", "en", "my", "none"), "Main language spoken"),
                         "transcript" to Schema.string("Exactly what was said, in the original language"),
-                        "translation" to Schema.string("Translation into the other language"),
                         "turns" to Schema.array(Schema.obj(line), "Who said what, in order. A single turn if only one person speaks."),
-                    )
+                    ) + translation
                 )
             },
             systemInstruction = content { text(Config.segmentPrompt(pair)) },
@@ -118,7 +118,7 @@ class SegmentTranslator(
                     attempt++
                     if (!online() && !pair.worksOffline) {
                         // No on-device Burmese: wait for the internet instead of guessing.
-                        space.updateCaption(id) { it.copy(status = SegmentStatus.QUEUED, note = "${Lang.name(pair.b)} needs internet · will translate when it's back") }
+                        space.updateCaption(id) { it.copy(status = SegmentStatus.QUEUED, note = "${Lang.name(pair.b)} needs internet · ${whenBack(pair)}") }
                         delay(backoff)
                         backoff = (backoff * 2).coerceAtMost(15_000L)
                         continue
@@ -136,13 +136,16 @@ class SegmentTranslator(
                             val response = model(pair).generateContent(
                                 content {
                                     inlineData(wav, "audio/wav")
-                                    text("Transcribe and translate this piece of speech.")
+                                    text(
+                                        if (pair.transcribeOnly) "Transcribe this piece of speech. Don't translate it."
+                                        else "Transcribe and translate this piece of speech."
+                                    )
                                 }
                             )
                             Log.d(TAG, "#$id answered in ${System.currentTimeMillis() - started} ms (attempt $attempt)")
                             JSONObject(response.text ?: "{}")
                         }
-                        apply(id, result, held.get() ?: spill!!.readBytes(), voicedMs)
+                        apply(id, pair, result, held.get() ?: spill!!.readBytes(), voicedMs)
                         break
                     } catch (e: CancellationException) {
                         throw e
@@ -155,7 +158,7 @@ class SegmentTranslator(
                             }
                             break
                         }
-                        val (note, permanent) = reason(e)
+                        val (note, permanent) = reason(e, pair)
                         Log.w(TAG, "#$id failed (attempt $attempt): ${e.javaClass.simpleName}: ${e.message?.take(200)} · retrying in ${backoff / 1000} s")
                         space.updateCaption(id) { it.copy(status = SegmentStatus.QUEUED, note = note) }
                         delay(backoff)
@@ -194,11 +197,14 @@ class SegmentTranslator(
         if (translated.isNotBlank()) speaker.say(translated, "seg-$id")
     }
 
+    private fun whenBack(pair: LangPair) =
+        if (pair.transcribeOnly) "will write it down when it's back" else "will translate when it's back"
+
     /** What to tell the user about a failed request, and whether it looks like a setup problem (slower retries). */
-    private fun reason(e: Exception): Pair<String, Boolean> {
+    private fun reason(e: Exception, pair: LangPair): Pair<String, Boolean> {
         val msg = (e.message.orEmpty() + " " + e.cause?.message.orEmpty()).lowercase()
         return when {
-            !online() -> "Waiting for internet · will translate when it's back" to false
+            !online() -> "Waiting for internet · ${whenBack(pair)}" to false
             "app check" in msg || "appcheck" in msg || "403" in msg || "permission_denied" in msg || "unauthenticated" in msg ->
                 "Blocked by Firebase App Check · check the app's App Check setup" to true
             e is QuotaExceededException || "quota" in msg || "429" in msg || "resource_exhausted" in msg ->
@@ -214,17 +220,18 @@ class SegmentTranslator(
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
 
-    private fun apply(id: Long, json: JSONObject, pcm: ByteArray, voicedMs: Long) {
+    private fun apply(id: Long, pair: LangPair, json: JSONObject, pcm: ByteArray, voicedMs: Long) {
         val language = json.optString("language")
         val transcript = json.optString("transcript").trim()
-        val translation = json.optString("translation").trim()
-        val words = language != "none" && transcript.isNotBlank() && translation.isNotBlank()
+        val only = pair.transcribeOnly
+        val translation = if (only) "" else json.optString("translation").trim()
+        val words = language != "none" && transcript.isNotBlank() && (only || translation.isNotBlank())
         // Each turn with where it is in the audio (seconds), to match its voice to a person.
         val timed = json.optJSONArray("turns")?.let { a ->
             (0 until a.length()).mapNotNull { a.optJSONObject(it) }.mapNotNull { o ->
                 val heard = o.optString("transcript").trim()
                 if (heard.isBlank()) null
-                else Turn(o.optString("speaker").trim().ifBlank { "?" }, heard, o.optString("translation").trim(), Lang.of(heard)) to
+                else Turn(o.optString("speaker").trim().ifBlank { "?" }, heard, if (only) "" else o.optString("translation").trim(), Lang.of(heard)) to
                     (o.optDouble("start", -1.0) to o.optDouble("end", -1.0))
             }
         }.orEmpty()
@@ -243,7 +250,8 @@ class SegmentTranslator(
         Log.d(TAG, "turn done #$id [$language]: heard=\"$transcript\" said=\"$translation\"" +
             if (split.isNotEmpty()) " voices=${split.map { it.speaker }.distinct()}" else "")
         if (words) identifyPeople(id, pcm, voicedMs, if (split.isNotEmpty()) timed else emptyList())
-        if (words) speaker.say(translation, "seg-$id")
+        // A transcript is never read out by itself: the mic would hear it.
+        if (words && !only) speaker.say(translation, "seg-$id")
     }
 
     /**

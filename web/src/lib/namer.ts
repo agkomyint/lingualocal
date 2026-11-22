@@ -31,7 +31,7 @@ async function check() {
       const text = pieces.slice(0, 10).map((c) => {
         const heard = c.heard.trim() ? c.heard : c.turns.map((t) => t.heard).join(" / ");
         const tr = c.translation.trim() ? c.translation : c.turns.map((t) => t.translation).join(" / ");
-        return `- ${heard} => ${tr}`;
+        return c.translation.trim() || c.turns.some((t) => t.translation.trim()) ? `- ${heard} => ${tr}` : `- ${heard}`;
       }).join("\n").slice(0, 2000);
       model ??= getGenerativeModel(fbNow().ai, { model: CLOUD_TEXT_MODEL });
       const r = await model.generateContent(

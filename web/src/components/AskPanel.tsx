@@ -4,7 +4,8 @@ import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { History, Plus, Send, Sparkles, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useAsk, ask, newChat, openThread, setEngine, type Engine, type Msg, type Thread } from "@/lib/ask";
-import { useApp } from "@/lib/state";
+import { projectOf, useApp } from "@/lib/state";
+import { pairOf } from "@/lib/lang";
 import { dMon, hm } from "@/lib/format";
 import { Spinner } from "./ui";
 
@@ -31,6 +32,7 @@ export function AskPanel({ onClose, className }: { onClose: () => void; classNam
   const { messages, busy, activity, liveSteps, threads, currentThread, engine } = useAsk();
   const nanoReady = useApp((s) => s.nanoReady);
   const nano = nanoReady && engine === "nano";
+  const burmeseOnly = useApp((s) => pairOf(projectOf(s.viewId)?.pair).transcribeOnly);
   const [showChats, setShowChats] = useState(false);
   const [input, setInput] = useState("");
   const online = useOnline();
@@ -89,7 +91,7 @@ export function AskPanel({ onClose, className }: { onClose: () => void; classNam
                 Gemini can read every piece, listen to the original voices again for tone and missed words, and look things up.
               </p>
               <div className="mt-3.5 flex flex-wrap gap-2">
-                {suggestions.map((s) => (
+                {suggestions.map((x) => (burmeseOnly && x.text.includes("in Thai") ? { ...x, text: "What should I reply in Burmese?" } : x)).map((s) => (
                   <button key={s.text} disabled={!usable || busy || (nano && s.cloud)} onClick={() => send(s.text)}
                     className="rounded-2xl border border-line-strong bg-raised px-3 py-2 text-left text-[13px] text-english-soft hover:bg-control disabled:opacity-50">
                     {s.text}

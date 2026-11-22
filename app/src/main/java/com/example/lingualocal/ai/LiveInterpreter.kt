@@ -136,7 +136,8 @@ class LiveInterpreter(private val space: com.example.lingualocal.ProjectSpace) {
             Character.isLetter(ch) -> "other"
             else -> null // digits, spaces, punctuation, combining marks of the scripts above
         }
-        val allowed = setOf(pair.a, pair.b)
+        // Burmese speech mixes in English words.
+        val allowed = if (pair.transcribeOnly) setOf(pair.a, com.example.lingualocal.data.Lang.EN) else setOf(pair.a, pair.b)
         val letters = text.mapNotNull { scriptOf(it) }
         if (letters.isEmpty()) return text
         if (letters.count { it in allowed } * 2 < letters.size) {

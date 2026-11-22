@@ -22,7 +22,8 @@ function scriptOf(ch: string): string | null {
 
 /** Drops a chunk mostly in a third language's script, and stray letters from other scripts. */
 export function keepPairScripts(text: string, pair: LangPair): string | null {
-  const allowed = new Set([pair.a, pair.b]);
+  // Burmese speech mixes in English words.
+  const allowed = new Set(pair.transcribeOnly ? [pair.a, EN] : [pair.a, pair.b]);
   const chars = [...text];
   const letters = chars.map(scriptOf).filter((s): s is string => s != null);
   if (!letters.length) return text;

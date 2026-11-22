@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DownloadDone
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Close
@@ -391,8 +392,10 @@ private fun PairSwitch(project: Project) {
                 .border(1.dp, LL.LineStrong, RoundedCornerShape(20.dp)).clickable { open = true }.padding(horizontal = 12.dp),
         ) {
             Text(pair.a.uppercase(), color = LL.lang(pair.a), fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            Text(" ⇄ ", color = LL.Faint, fontSize = 13.sp)
-            Text(pair.b.uppercase(), color = LL.lang(pair.b), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            if (!pair.transcribeOnly) {
+                Text(" ⇄ ", color = LL.Faint, fontSize = 13.sp)
+                Text(pair.b.uppercase(), color = LL.lang(pair.b), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
         }
         androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { open = false }, containerColor = LL.Raised) {
             com.example.lingualocal.data.LangPair.entries.forEach { p ->
@@ -400,7 +403,10 @@ private fun PairSwitch(project: Project) {
                     text = {
                         Column {
                             Text(p.label, color = LL.Text, fontSize = 15.sp, fontWeight = if (p == pair) FontWeight.SemiBold else FontWeight.Normal)
-                            Text(if (p.worksOffline) "Works offline too" else "Needs internet", color = LL.Faint, fontSize = 12.sp)
+                            Text(
+                                when { p.transcribeOnly -> "No translation · needs internet"; p.worksOffline -> "Works offline too"; else -> "Needs internet" },
+                                color = LL.Faint, fontSize = 12.sp,
+                            )
                         }
                     },
                     trailingIcon = { if (p == pair) Icon(Icons.Filled.Check, contentDescription = "Selected", tint = LL.English, modifier = Modifier.size(18.dp)) },
@@ -551,7 +557,7 @@ private fun EmptyTranscript(running: Boolean) {
         LogoMark(56.dp)
         Spacer(Modifier.height(12.dp))
         Text(
-            if (running) "Listening… speak ${LocalSpace.current.pair.label.replace(" ⇄ ", " or ")} nearby." else "Tap listen, or type below.",
+            if (running) "Listening… speak ${LocalSpace.current.pair.label.replace(" ⇄ ", " or ").removeSuffix(" only")} nearby." else "Tap listen, or type below.",
             color = LL.Text, fontSize = 16.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(4.dp))
@@ -679,8 +685,13 @@ private fun BubbleHeader(caption: Caption, heardLang: String) {
         Text(clock.format(Date(caption.time)), color = LL.Faint, fontSize = 12.sp)
         if (heardLang.isNotBlank()) {
             Spacer(Modifier.width(8.dp))
-            LangPill(heardLang, Lang.target(heardLang, caption.translation.ifBlank { caption.turns.firstOrNull()?.translation.orEmpty() })
-                .takeIf { caption.done } ?: Lang.other(heardLang, LocalSpace.current.pair))
+            val pair = LocalSpace.current.pair
+            val to = when {
+                caption.textOnly || (!caption.done && pair.transcribeOnly) -> ""
+                caption.done -> Lang.target(heardLang, caption.translation.ifBlank { caption.turns.firstOrNull()?.translation.orEmpty() })
+                else -> Lang.other(heardLang, pair)
+            }
+            LangPill(heardLang, to)
         }
     }
 }
@@ -707,9 +718,9 @@ private fun PersonDialog(n: Int, onDismiss: () -> Unit) {
     ) { People.rename(n, it); onDismiss() }
 }
 
-/** Reads [text] (a translation) aloud in its language. Tap again to stop. */
+/** Reads [text] (a translation, or the words of a piece without one) aloud in its language. Tap again to stop. */
 @Composable
-private fun SayButton(text: String, key: String, label: Boolean = true, saved: Boolean = false) {
+private fun SayButton(text: String, key: String, label: Boolean = true, saved: Boolean = false, own: Boolean = false) {
     val saying by PlayAll.saying.collectAsStateWithLifecycle()
     val on = saying == key
     val lang = Lang.of(text)
@@ -720,7 +731,11 @@ private fun SayButton(text: String, key: String, label: Boolean = true, saved: B
     ) {
         Icon(
             if (on) Icons.Filled.Stop else Icons.AutoMirrored.Outlined.VolumeUp,
-            contentDescription = if (on) "Stop" else "Speak the ${Lang.name(lang)} translation",
+            contentDescription = when {
+                on -> "Stop"
+                own -> "Read the ${Lang.name(lang)} text aloud"
+                else -> "Speak the ${Lang.name(lang)} translation"
+            },
             tint = LL.lang(lang), modifier = Modifier.size(18.dp),
         )
         if (label) {
@@ -734,6 +749,32 @@ private fun SayButton(text: String, key: String, label: Boolean = true, saved: B
     }
 }
 
+/** Copies the words of a piece that has no translation. */
+@Composable
+private fun CopyButton(caption: Caption) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val copy = {
+        val text = if (caption.turns.isNotEmpty()) caption.turns.joinToString("\n") { it.heard.trim() } else caption.heard.trim()
+        val copied = runCatching {
+            context.getSystemService(android.content.ClipboardManager::class.java)
+                .setPrimaryClip(android.content.ClipData.newPlainText("LinguaLocal", text))
+        }.isSuccess
+        // Android 13+ confirms a copy by itself.
+        if (!copied || android.os.Build.VERSION.SDK_INT < 33) {
+            android.widget.Toast.makeText(context, if (copied) "Copied" else "Couldn't copy", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.clip(RoundedCornerShape(16.dp)).background(LL.Control).clickable { copy() }
+            .padding(start = 8.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
+    ) {
+        Icon(Icons.Outlined.ContentCopy, contentDescription = "Copy the text", tint = LL.Text, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(4.dp))
+        Text("Copy", color = LL.Text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
 @Composable
 private fun LangPill(from: String, to: String) {
     Row(
@@ -741,8 +782,10 @@ private fun LangPill(from: String, to: String) {
         modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(LL.Raised).padding(horizontal = 8.dp, vertical = 2.dp),
     ) {
         Text(from.uppercase(), color = LL.lang(from), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-        Text(" → ", color = LL.Faint, fontSize = 11.sp)
-        Text(to.uppercase(), color = LL.lang(to), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        if (to.isNotBlank()) {
+            Text(" → ", color = LL.Faint, fontSize = 11.sp)
+            Text(to.uppercase(), color = LL.lang(to), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        }
     }
 }
 
@@ -751,6 +794,8 @@ private fun BubbleBody(caption: Caption, heardLang: String, playing: Boolean) {
     val space = LocalSpace.current
     val scope = rememberCoroutineScope()
     var explaining by remember { mutableStateOf(false) }
+    val own = caption.textOnly
+    val writing = space.pair.transcribeOnly
 
     if (caption.turns.isNotEmpty()) {
         // More than one voice inside this piece: who said what (A, B are per piece).
@@ -759,11 +804,15 @@ private fun BubbleBody(caption: Caption, heardLang: String, playing: Boolean) {
             Column {
                 TurnLabel(t)
                 Column {
-                    Text(t.heard.trim(), color = LL.Muted, fontSize = 15.sp, lineHeight = 22.sp)
+                    if (own) Text(t.heard.trim(), color = LL.Text, fontSize = 18.sp, fontWeight = FontWeight.Medium, lineHeight = 30.sp)
+                    else Text(t.heard.trim(), color = LL.Muted, fontSize = 15.sp, lineHeight = 22.sp)
                     if (t.translation.isNotBlank()) Text(t.translation.trim(), color = LL.Text, fontSize = 18.sp, fontWeight = FontWeight.Medium, lineHeight = 26.sp)
                 }
             }
         }
+    } else if (own) {
+        // Burmese stacks above and below the line, so it gets more height than a translation.
+        Text(caption.heard.trim(), color = LL.Text, fontSize = 19.sp, fontWeight = FontWeight.Medium, lineHeight = 31.sp)
     } else {
         val original = caption.heard.trim().ifBlank { if (!caption.done) caption.preview.trim() else "" }
         if (original.isNotBlank()) {
@@ -775,9 +824,9 @@ private fun BubbleBody(caption: Caption, heardLang: String, playing: Boolean) {
         when {
             caption.translation.isNotBlank() ->
                 Text(caption.translation.trim(), color = LL.Text, fontSize = 19.sp, fontWeight = FontWeight.Medium, lineHeight = 27.sp)
-            caption.status == SegmentStatus.QUEUED -> PendingLine("Waiting to translate", LL.Thai)
+            caption.status == SegmentStatus.QUEUED -> PendingLine(if (writing) "Waiting to write down" else "Waiting to translate", LL.Thai)
             caption.status == SegmentStatus.RECORDING -> PendingLine("Recording", LL.Thai)
-            else -> PendingLine("Translating", LL.English)
+            else -> PendingLine(if (writing) "Writing" else "Translating", LL.English)
         }
     }
 
@@ -811,10 +860,14 @@ private fun BubbleBody(caption: Caption, heardLang: String, playing: Boolean) {
             Spacer(Modifier.width(8.dp))
         }
         if (caption.audioFile != null || caption.durationMs > 0) Text("%.1f s".format(caption.durationMs / 1000f), color = LL.Faint, fontSize = 12.sp)
-        val spoken = if (caption.turns.isNotEmpty()) caption.turns.joinToString(" ") { it.translation }.trim() else caption.translation.trim()
+        val spoken = caption.spokenText
         if (caption.done && spoken.isNotBlank()) {
             Spacer(Modifier.width(10.dp))
-            SayButton(spoken, caption.id.toString(), saved = com.example.lingualocal.audio.TranslationVoice.saved(caption, spoken) != null)
+            SayButton(spoken, caption.id.toString(), saved = com.example.lingualocal.audio.TranslationVoice.saved(caption, spoken) != null, own = own)
+        }
+        if (own) {
+            Spacer(Modifier.width(6.dp))
+            CopyButton(caption)
         }
         if (caption.done && caption.explanation == null && caption.translation.isNotBlank()) {
             Spacer(Modifier.width(10.dp))
@@ -880,7 +933,9 @@ private fun CorrectionBox(id: Long, k: com.example.lingualocal.Revision) {
         }
         if (open) {
             val before = k.heard.ifBlank { k.turns.joinToString(" / ") { "${it.speaker}: ${it.heard}" } }
-            val beforeTr = k.translation.ifBlank { k.turns.joinToString(" / ") { "${it.speaker}: ${it.translation}" } }
+            val beforeTr = k.translation.ifBlank {
+                k.turns.filter { it.translation.isNotBlank() }.joinToString(" / ") { "${it.speaker}: ${it.translation}" }
+            }
             Spacer(Modifier.height(8.dp))
             Text("Before", color = LL.Faint, fontSize = 12.sp)
             Text(before, color = LL.Faint, fontSize = 14.sp, lineHeight = 20.sp)
@@ -957,8 +1012,10 @@ private fun PlayerBar(captions: List<Caption>, wide: Boolean) {
 
 @Composable
 private fun ModeSegments(mode: PlayMode, modifier: Modifier = Modifier) {
+    val project by LocalSpace.current.project.collectAsStateWithLifecycle()
+    val spokenLabel = if (com.example.lingualocal.data.LangPair.of(project.pair).transcribeOnly) "Text read aloud" else "Translations spoken"
     Row(modifier.clip(RoundedCornerShape(12.dp)).background(LL.Bg).padding(3.dp)) {
-        listOf(PlayMode.ORIGINAL to "Original voices", PlayMode.TRANSLATION to "Translations spoken").forEach { (m, text) ->
+        listOf(PlayMode.ORIGINAL to "Original voices", PlayMode.TRANSLATION to spokenLabel).forEach { (m, text) ->
             val sel = m == mode
             Text(
                 text, color = if (sel) LL.Text else LL.Muted, fontSize = 12.sp, fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
@@ -1014,10 +1071,11 @@ private fun statusLine(running: Boolean): String {
     val project by LocalSpace.current.project.collectAsStateWithLifecycle()
     val pair = com.example.lingualocal.data.LangPair.of(project.pair)
     return when {
+        held && pair.transcribeOnly -> "Speak now… release to write it down"
         held && pair != com.example.lingualocal.data.LangPair.TH_EN -> "Speak now… release to translate"
         held -> ptt.ifBlank { "Speak English now… release to translate" }
         running && AppState.runningSource.value == com.example.lingualocal.AudioSource.PHONE -> "Phone audio · ${pair.label} · ${elapsed(running)}"
-        running -> "Listening · ${pair.label} auto-detected · ${elapsed(running)}"
+        running -> "Listening · ${pair.label}${if (pair.transcribeOnly) "" else " auto-detected"} · ${elapsed(running)}"
         else -> "Tap the mic to start listening"
     }
 }
@@ -1052,7 +1110,10 @@ private fun InputBar(running: Boolean, elsewhere: com.example.lingualocal.Projec
     }
     val canHold = running && source != com.example.lingualocal.AudioSource.PHONE
     val status = statusLine(running)
-    val hint = if (held || running) status else "Type to translate, or tap to listen"
+    val project by space.project.collectAsStateWithLifecycle()
+    val writing = com.example.lingualocal.data.LangPair.of(project.pair).transcribeOnly
+    val typeLabel = if (writing) "Type to hear it" else "Type to translate"
+    val hint = if (held || running) status else "$typeLabel, or tap to listen"
     Box(
         Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = if (wide) 24.dp else 12.dp, vertical = 10.dp),
         contentAlignment = Alignment.Center,
@@ -1068,7 +1129,7 @@ private fun InputBar(running: Boolean, elsewhere: com.example.lingualocal.Projec
             Spacer(Modifier.width(12.dp))
             Box(Modifier.weight(1f).heightIn(min = 44.dp), contentAlignment = Alignment.CenterStart) {
                 if (running && text.isEmpty()) WaveBars(running, Modifier.fillMaxWidth().height(26.dp).alpha(0.3f))
-                if (text.isEmpty() && elsewhere != null) ElsewhereHint(elsewhere, wide)
+                if (text.isEmpty() && elsewhere != null) ElsewhereHint(elsewhere, wide, typeLabel)
                 else if (text.isEmpty()) Text(
                     hint, color = if (held) LL.Text else if (running) LL.Muted else LL.Faint,
                     fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -1085,7 +1146,8 @@ private fun InputBar(running: Boolean, elsewhere: com.example.lingualocal.Projec
             }
             if (text.isBlank()) {
                 SourceToggle(running, onToggle)
-                BarIcon(
+                // Transcripts are never read out by themselves, so the switch would do nothing here.
+                if (!writing) BarIcon(
                     if (speak) Icons.AutoMirrored.Outlined.VolumeUp else Icons.AutoMirrored.Outlined.VolumeOff,
                     if (speak) "Translations are read aloud" else "Captions only", active = speak,
                 ) { AppState.speakAloud.value = !speak }
@@ -1095,7 +1157,7 @@ private fun InputBar(running: Boolean, elsewhere: com.example.lingualocal.Projec
                 Box(
                     Modifier.size(48.dp).clip(CircleShape).background(LL.English).clickable { send() },
                     contentAlignment = Alignment.Center,
-                ) { Icon(Icons.AutoMirrored.Outlined.Send, contentDescription = "Translate", tint = LL.Bg, modifier = Modifier.size(20.dp)) }
+                ) { Icon(Icons.AutoMirrored.Outlined.Send, contentDescription = if (writing) "Read aloud" else "Translate", tint = LL.Bg, modifier = Modifier.size(20.dp)) }
             } else {
                 // Your voice. Needs listening on (mic), because it goes through the same pipeline.
                 Box(
@@ -1128,7 +1190,7 @@ private fun InputBar(running: Boolean, elsewhere: com.example.lingualocal.Projec
 
 /** The empty input while another project records: says so, and that the listen button moves the recording here. */
 @Composable
-private fun ElsewhereHint(live: com.example.lingualocal.ProjectSpace, wide: Boolean) {
+private fun ElsewhereHint(live: com.example.lingualocal.ProjectSpace, wide: Boolean, typeLabel: String) {
     val p by live.project.collectAsStateWithLifecycle()
     val name = if (p.name.startsWith("Untitled · ")) "Untitled" else p.name
     Column {
@@ -1138,7 +1200,7 @@ private fun ElsewhereHint(live: com.example.lingualocal.ProjectSpace, wide: Bool
             Text("Recording in $name", color = LL.Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Text(
-            if (wide) "Type to translate, or tap to record here instead" else "Type, or tap to switch",
+            if (wide) "$typeLabel, or tap to record here instead" else "Type, or tap to switch",
             color = LL.Faint, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
     }
@@ -1192,7 +1254,10 @@ private fun SourceToggle(running: Boolean, toggle: () -> Unit) {
     }
 }
 
-/** A typed message becomes a piece of the project ("You"), translated and saved like spoken ones. */
+/**
+ * A typed message becomes a piece of the project ("You"), translated and saved like spoken ones.
+ * In a one-language project it is read aloud as typed instead.
+ */
 private fun sendTyped(space: com.example.lingualocal.ProjectSpace, input: String, scope: kotlinx.coroutines.CoroutineScope) {
     val pair = space.pair
     val listeningHere = AppState.liveId() == space.id
@@ -1201,9 +1266,15 @@ private fun sendTyped(space: com.example.lingualocal.ProjectSpace, input: String
     val lastSession = space.captions.value.lastOrNull { it.id != id }?.session
     space.updateCaption(id) {
         it.copy(
-            heard = input, lang = Lang.of(input), status = SegmentStatus.TRANSLATING,
+            heard = input, lang = Lang.of(input),
+            status = if (pair.transcribeOnly) SegmentStatus.DONE else SegmentStatus.TRANSLATING,
             session = if (listeningHere || lastSession == null) it.session else lastSession,
         )
+    }
+    if (pair.transcribeOnly) {
+        // Typed here to be heard, so it plays whatever the speaker switch says; the voice is saved with the piece.
+        PlayAll.say(input, id.toString())
+        return
     }
     scope.launch(kotlinx.coroutines.NonCancellable) {
         runCatching {

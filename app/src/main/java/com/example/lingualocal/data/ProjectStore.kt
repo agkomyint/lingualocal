@@ -83,6 +83,9 @@ object ProjectStore {
         }
     }
 
+    /** Projects still in memory, including ones just left. */
+    fun openSpaces(): List<ProjectSpace> = open.values.toList()
+
     private fun inUse(s: ProjectSpace) = AppState.view.value === s || AppState.live.value === s
 
     /** Lets go of [s] unless it came back on screen or into recording meanwhile ([force]: deleting). */
@@ -327,7 +330,11 @@ object ProjectStore {
         put("id", c.id); put("time", c.time); put("durationMs", c.durationMs); put("status", c.status.name)
         // Direction is stored explicitly (th -> en or en -> th) so the pieces can be used as training pairs later.
         val lang = c.lang.ifEmpty { Lang.of(c.heard) }
-        if (lang.isNotEmpty()) { put("lang", lang); put("target", Lang.target(lang, c.translation.ifBlank { c.turns.firstOrNull()?.translation.orEmpty() })) }
+        if (lang.isNotEmpty()) {
+            put("lang", lang)
+            // Only written down: there is no target language.
+            if (!c.textOnly) put("target", Lang.target(lang, c.translation.ifBlank { c.turns.firstOrNull()?.translation.orEmpty() }))
+        }
         put("heard", c.heard); put("translation", c.translation)
         if (c.preview.isNotBlank()) put("preview", c.preview) // the live grey words, kept as they were
         if (c.engine.isNotEmpty()) put("engine", c.engine)
@@ -341,7 +348,8 @@ object ProjectStore {
         if (c.turns.isNotEmpty()) put("turns", JSONArray().apply {
             c.turns.forEach {
                 val lang = it.lang.ifEmpty { Lang.of(it.heard) }
-                put(JSONObject().put("speaker", it.speaker).put("lang", lang).put("target", Lang.target(lang, it.translation))
+                put(JSONObject().put("speaker", it.speaker).put("lang", lang)
+                    .apply { if (!c.textOnly) put("target", Lang.target(lang, it.translation)) }
                     .put("heard", it.heard).put("translation", it.translation).apply { it.person?.let { p -> put("person", p) } })
             }
         })
@@ -353,7 +361,10 @@ object ProjectStore {
             c.revisions.forEach { r ->
                 put(JSONObject().apply {
                     put("heard", r.heard); put("translation", r.translation)
-                    if (r.lang.isNotEmpty()) { put("lang", r.lang); put("target", Lang.target(r.lang, r.translation)) }
+                    if (r.lang.isNotEmpty()) {
+                        put("lang", r.lang)
+                        if (!c.textOnly || r.translation.isNotBlank()) put("target", Lang.target(r.lang, r.translation))
+                    }
                     put("engine", r.engine)
                     if (r.turns.isNotEmpty()) put("turns", JSONArray().apply {
                         r.turns.forEach { put(JSONObject().put("speaker", it.speaker).put("lang", it.lang).put("heard", it.heard).put("translation", it.translation)) }

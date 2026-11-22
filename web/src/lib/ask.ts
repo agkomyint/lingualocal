@@ -13,7 +13,7 @@ import { Lang, TH, EN, MY } from "./lang";
 import { app, captionsOf, caption, pairFor, updateCaption } from "./state";
 import { askCol, audioBlob } from "./store";
 import { base64 } from "./audio";
-import { USER_UNDO, correctionOf, searchText, type Caption, type Revision } from "./types";
+import { USER_UNDO, correctionOf, searchText, textOnly, type Caption, type Revision, type Turn } from "./types";
 
 export type Role = "USER" | "AI";
 /** source: which model wrote an answer, e.g. "cloud · gemini…" or "on-device · Gemini Nano". */
@@ -43,6 +43,8 @@ const TITLE_MAX = 60;
 
 const SYSTEM = `You are the assistant inside LinguaLocal, a live interpreter used by people living in Thailand. Each project
 is either Thai ⇄ English or Thai ⇄ Burmese (read_transcript says which). Write Burmese in Myanmar Unicode script.
+A project can also be Burmese only: its pieces are written down as spoken and have no translation. That is how the
+user wants them, so don't call a missing translation a mistake or add one, and suggest what to say in Burmese.
 The user asks about a conversation the app recorded and translated (the open project).
 Use read_transcript to see it; in long meetings, find earlier parts with search_transcript and read_pieces
 instead of guessing. When tone, intent, or the exact words matter, use listen_to_recording on the
@@ -92,12 +94,12 @@ const tools = [{
         properties: {
           id: Schema.integer({ description: "The piece id." }),
           heard: Schema.string({ description: "The corrected transcript, in the language actually spoken (Thai script for Thai, Myanmar Unicode for Burmese)." }),
-          translation: Schema.string({ description: "The corrected translation into the other language of the project's pair." }),
+          translation: Schema.string({ description: "The corrected translation into the other language of the project's pair. Leave it out for a piece that has no translation in a Burmese only project." }),
           language: Schema.enumString({ enum: ["th", "en", "my"], description: "Language actually spoken in the piece (my = Burmese)." }),
           reason: Schema.string({ description: "Short reason shown to the user, e.g. 'missed the negative ไม่ (don't)'." }),
           speaker: Schema.string({ description: "Only for pieces with turns: the speaker letter (A, B…) whose turn to correct." }),
         },
-        optionalProperties: ["speaker"],
+        optionalProperties: ["translation", "speaker"],
       }),
     },
     {
@@ -244,9 +246,13 @@ const NANO_TURNS = 6;
 
 const NANO_SYSTEM = `You are the assistant inside LinguaLocal, a live interpreter used by people living in Thailand.
 Below is the transcript of the conversation the user is asking about: one line per piece, with time, speaker,
-spoken language, what was heard and its translation. Answer short and practical in the language the user writes in.
+spoken language, what was heard and its translation if it has one. Answer short and practical in the language the user writes in.
 Refer to pieces by their time. Only use what the transcript shows; if it doesn't show something, say so.
 You can't hear the recordings or search the web.`;
+
+const turnText = (t: Turn) => `${t.speaker}: ${t.heard}${t.translation.trim() ? ` => ${t.translation}` : ""}`;
+/** Whether a piece is meant to have no translation (also one with no words yet in a one-language project). */
+const untranslated = (c: Caption) => textOnly(c) || (!c.translation.trim() && pairFor(projectId).transcribeOnly);
 
 /** Newest pieces that fit Nano's small context, oldest first. */
 function nanoLines(list: Caption[], max: number): string[] {
@@ -256,8 +262,8 @@ function nanoLines(list: Caption[], max: number): string[] {
     const c = list[i];
     const who = c.mine ? "you" : c.speaker != null ? `voice ${c.speaker}` : "someone";
     const body = c.turns.length
-      ? c.turns.map((t) => `${t.speaker}: ${t.heard} => ${t.translation}`).join(" / ")
-      : `${c.heard.slice(0, MAX_TEXT)} => ${c.translation.slice(0, MAX_TEXT)}`;
+      ? c.turns.map(turnText).join(" / ")
+      : `${c.heard.slice(0, MAX_TEXT)}${c.translation.trim() ? ` => ${c.translation.slice(0, MAX_TEXT)}` : ""}`;
     const line = `${clock(c.time)} ${who}${c.lang.trim() ? ` (${c.lang})` : ""}: ${body}`;
     if (chars + line.length > NANO_CHARS && out.length) break;
     chars += line.length + 1;
@@ -392,8 +398,11 @@ function rows(list: Caption[], sessions: number[]): string {
       speaker: c.mine ? "the user (push-to-talk)" : c.speaker != null ? `voice ${c.speaker}` : "unknown",
     };
     if (c.lang.trim()) o.language = c.lang;
-    if (c.turns.length) o.turns = c.turns.map((t) => `${t.speaker}: ${t.heard} => ${t.translation}`);
-    else { o.heard = c.heard.slice(0, MAX_TEXT); o.translation = c.translation.slice(0, MAX_TEXT); }
+    if (c.turns.length) o.turns = c.turns.map(turnText);
+    else {
+      o.heard = c.heard.slice(0, MAX_TEXT);
+      if (c.translation.trim()) o.translation = c.translation.slice(0, MAX_TEXT);
+    }
     o.has_audio = !!c.audioFile;
     return o;
   }));
@@ -406,13 +415,17 @@ async function listen(c: Caption, question: string): Promise<string> {
   if (!blob) return "The audio file is missing.";
   const bytes = new Uint8Array(await blob.arrayBuffer());
   const heard = c.heard.trim() ? c.heard : c.turns.map((t) => `${t.speaker}: ${t.heard}`).join(" / ");
+  const only = untranslated(c);
+  const check = only
+    ? `Check the transcript against the audio. It is wanted without a translation. If it is wrong, give the corrected
+transcript (in the language spoken) and how confident you are (high / medium / low).`
+    : `Check the transcript and translation against the audio. If either is wrong, give the corrected transcript (in the
+language spoken), the corrected translation, and how confident you are (high / medium / low).`;
   const prompt = `This is a recording from a conversation in Thailand (${pairFor(projectId).label}, possibly mixed).
-The app's transcript was: "${heard}"
-Its translation was: "${c.translation}"
+The app's transcript was: "${heard}"${only ? "" : `\nIts translation was: "${c.translation}"`}
 Listen to the audio itself and answer: ${question.trim() ? question : "What is said, by whom, and in what tone?"}
 Be specific and brief. Quote Thai words with their English meaning.
-Check the transcript and translation against the audio. If either is wrong, give the corrected transcript (in the
-language spoken), the corrected translation, and how confident you are (high / medium / low).`;
+${check}`;
   const r = await listener().generateContent([
     { inlineData: { data: base64(bytes), mimeType: path.toLowerCase().endsWith(".wav") ? "audio/wav" : "audio/mp4" } },
     { text: prompt },
@@ -427,8 +440,10 @@ function correct(args: Record<string, unknown>, str: (k: string) => string, num:
   const c = pid ? caption(pid, id) : undefined;
   if (!pid || !c) return `No piece with id ${id}.`;
   if (!heardIds.has(id)) return `Listen to piece ${id} with listen_to_recording before correcting it.`;
-  const heard = str("heard"), translation = str("translation");
-  if (!heard || !translation) return "Both heard and translation are required.";
+  const only = untranslated(c);
+  const heard = str("heard"), translation = only ? "" : str("translation");
+  if (!heard) return "heard is required.";
+  if (!only && !translation) return "Both heard and translation are required.";
   const l = str("language");
   const lang = [TH, EN, MY].includes(l) ? l : Lang.of(heard);
   const reason = str("reason") || "Checked against the recording";
@@ -445,7 +460,9 @@ function correct(args: Record<string, unknown>, str: (k: string) => string, num:
   set({ activity: `Correcting ${time}…` });
   step(`Corrected ${time}`);
   const before = c.heard.trim() ? c.heard : c.turns.map((t) => t.heard).join(" / ");
-  return `Saved. Piece ${id} now reads "${heard}" → "${translation}". The previous text was "${before}" → "${c.translation}".`;
+  return only
+    ? `Saved. Piece ${id} now reads "${heard}". The previous text was "${before}".`
+    : `Saved. Piece ${id} now reads "${heard}" → "${translation}". The previous text was "${before}" → "${c.translation}".`;
 }
 
 /** Puts back what the piece said before Ask's last fix (the fix stays in the history). */

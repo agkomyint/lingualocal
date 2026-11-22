@@ -332,21 +332,31 @@ private fun PairPicker() {
     val picked by AppState.nextPair.collectAsStateWithLifecycle()
     val projects by AppState.projects.collectAsStateWithLifecycle()
     val current = picked ?: com.example.lingualocal.data.LangPair.of(projects.firstOrNull()?.pair)
-    Row(
-        Modifier.clip(RoundedCornerShape(20.dp)).background(LL.Raised).padding(3.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        com.example.lingualocal.data.LangPair.entries.forEach { p ->
-            val on = p == current
+    val (single, pairs) = com.example.lingualocal.data.LangPair.entries.partition { it.transcribeOnly }
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        listOf(pairs, single).forEach { group ->
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.height(34.dp).clip(RoundedCornerShape(17.dp))
-                    .background(if (on) LL.Surface else androidx.compose.ui.graphics.Color.Transparent)
-                    .clickable { AppState.nextPair.value = p }.padding(horizontal = 14.dp),
+                Modifier.clip(RoundedCornerShape(20.dp)).background(LL.Raised).padding(3.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                Text(p.a.uppercase(), color = if (on) LL.lang(p.a) else LL.Faint, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                Text(" ⇄ ", color = LL.Faint, fontSize = 13.sp)
-                Text(p.b.uppercase(), color = if (on) LL.lang(p.b) else LL.Faint, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                group.forEach { p ->
+                    val on = p == current
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.height(34.dp).clip(RoundedCornerShape(17.dp))
+                            .background(if (on) LL.Surface else androidx.compose.ui.graphics.Color.Transparent)
+                            .clickable { AppState.nextPair.value = p }.padding(horizontal = 14.dp),
+                    ) {
+                        if (p.transcribeOnly) {
+                            Text(p.label, color = if (on) LL.lang(p.a) else LL.Faint, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            Text(" · no translation", color = LL.Faint, fontSize = 13.sp)
+                        } else {
+                            Text(p.a.uppercase(), color = if (on) LL.lang(p.a) else LL.Faint, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            Text(" ⇄ ", color = LL.Faint, fontSize = 13.sp)
+                            Text(p.b.uppercase(), color = if (on) LL.lang(p.b) else LL.Faint, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
         }
     }

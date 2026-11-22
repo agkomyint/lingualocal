@@ -88,6 +88,20 @@ data class Caption(
     /** The latest change, when it was a fix by Ask that the user hasn't undone. */
     val correction: Revision? get() = revisions.lastOrNull()?.takeIf { it.by != Revision.USER_UNDO }
     val done: Boolean get() = status == SegmentStatus.DONE || status == SegmentStatus.NO_SPEECH || status == SegmentStatus.SKIPPED
+
+    /** A finished piece that was only written down (or typed to be read aloud): words, and no translation. */
+    val textOnly: Boolean get() = status == SegmentStatus.DONE && note == null && (heard.isNotBlank() || turns.isNotEmpty()) &&
+        translation.isBlank() && turns.all { it.translation.isBlank() }
+
+    /** What reading this piece aloud says: its translation, or its own words when it was only written down. */
+    val spokenText: String get() {
+        val own = textOnly
+        return when {
+            turns.isNotEmpty() -> turns.joinToString(" ") { if (own) it.heard else it.translation }
+            own -> heard
+            else -> translation
+        }.trim()
+    }
 }
 
 /** One bar of the live waveform: mic level plus what the pipeline was doing at that moment. */

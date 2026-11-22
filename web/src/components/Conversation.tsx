@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DropdownMenu } from "radix-ui";
 import {
-  ArrowLeft, Check, CircleCheck, Ear, Info, Keyboard, Mic, Monitor, Play, Search, Send, SkipBack, SkipForward,
+  ArrowLeft, Check, CircleCheck, Copy, Ear, Info, Keyboard, Mic, Monitor, Play, Search, Send, SkipBack, SkipForward,
   SlidersHorizontal, Sparkles, Square, Users, Volume2, VolumeX,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -21,7 +21,7 @@ import { clockHits, matches, peopleIn, pieceAt, searchWords, timeMarks, type Tim
 import { clockLength, dayLabel, duration, hm } from "@/lib/format";
 import * as nav from "@/lib/nav";
 import { useReplay } from "@/lib/nav";
-import { correctionOf, isDone, type Caption, type Project, type Revision, type Turn } from "@/lib/types";
+import { correctionOf, isDone, textOnly, type Caption, type Project, type Revision, type Turn } from "@/lib/types";
 import { MIC_SAMPLE_RATE } from "@/lib/config";
 import { AskPanel } from "./AskPanel";
 import { FindBar, GoToRow } from "./FindBar";
@@ -194,7 +194,7 @@ export function Conversation({ project, showBack }: { project: Project; showBack
         <div className="relative min-h-0 flex-1">
           <div ref={listRef} onScroll={onScroll} className="h-full overflow-y-auto">
             <div className={cn("mx-auto flex w-full max-w-[860px] flex-col gap-3.5 py-3", pad)}>
-              {captions.length === 0 && <EmptyTranscript running={running} pairLabel={pairOf(project.pair).label} />}
+              {captions.length === 0 && <EmptyTranscript running={running} pairLabel={pairOf(project.pair).label.replace(" only", "")} />}
               {rows.map((r) => (
                 <div key={r.key} data-row={r.key}>
                   {r.kind === "session" ? <SessionDivider row={r} />
@@ -224,7 +224,7 @@ export function Conversation({ project, showBack }: { project: Project; showBack
             </button>
           </div>
         )}
-        {playing != null && <PlayerBar wide={wide} />}
+        {playing != null && <PlayerBar wide={wide} textMode={pairOf(project.pair).transcribeOnly} />}
         <InputBar pid={pid} pairCode={project.pair} running={running} elsewhere={elsewhere} wide={wide} />
       </div>
       {asking && askSide && (
@@ -308,8 +308,12 @@ function PairSwitch({ project }: { project: Project }) {
       <DropdownMenu.Trigger asChild>
         <button aria-label={`Language pair: ${pair.label}`} className="flex h-10 shrink-0 items-center rounded-[20px] border border-line-strong bg-raised px-3 text-[13px] font-bold hover:bg-control">
           <span style={{ color: langColor(pair.a) }}>{pair.a.toUpperCase()}</span>
-          <span className="font-normal text-faint">&nbsp;⇄&nbsp;</span>
-          <span style={{ color: langColor(pair.b) }}>{pair.b.toUpperCase()}</span>
+          {!pair.transcribeOnly && (
+            <>
+              <span className="font-normal text-faint">&nbsp;⇄&nbsp;</span>
+              <span style={{ color: langColor(pair.b) }}>{pair.b.toUpperCase()}</span>
+            </>
+          )}
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
@@ -319,7 +323,7 @@ function PairSwitch({ project }: { project: Project }) {
               className="flex cursor-pointer items-center gap-3 px-4 py-2.5 outline-none data-[highlighted]:bg-control">
               <div className="flex-1">
                 <div className={cn("text-[15px] text-text", p.code === pair.code && "font-semibold")}>{p.label}</div>
-                <div className="text-[12px] text-faint">{p.worksOffline ? "Works offline too" : "Needs internet"}</div>
+                <div className="text-[12px] text-faint">{p.transcribeOnly ? "No translation · needs internet" : p.worksOffline ? "Works offline too" : "Needs internet"}</div>
               </div>
               {p.code === pair.code && <Check size={18} className="text-english" aria-label="Selected" />}
             </DropdownMenu.Item>
@@ -421,7 +425,7 @@ function Bubble({ c, pid, pairCode, names, playing }: { c: Caption; pid: string;
       <BubbleHeader c={c} pid={pid} pairCode={pairCode} names={names} heardLang={heardLang} />
       <div className={cn("relative mt-1.5 overflow-hidden rounded-[16px] bg-surface pb-2 pl-[18px] pr-4 pt-3.5", ring)}>
         {c.mine && <div className="absolute inset-y-0 left-0 w-[3px] bg-english" />}
-        <BubbleBody c={c} pid={pid} playing={playing} names={names} />
+        <BubbleBody c={c} pid={pid} pairCode={pairCode} playing={playing} names={names} />
       </div>
     </div>
   );
@@ -431,7 +435,9 @@ function BubbleHeader({ c, pid, pairCode, names, heardLang }: { c: Caption; pid:
   const [renaming, setRenaming] = useState(false);
   const person = c.mine ? null : c.speaker ?? null;
   const firstTr = c.translation.trim() ? c.translation : c.turns[0]?.translation ?? "";
-  const to = isDone(c) ? Lang.target(heardLang, firstTr) : Lang.other(heardLang, pairOf(pairCode));
+  const pair = pairOf(pairCode);
+  const to = isDone(c) ? (textOnly(c) ? "" : Lang.target(heardLang, firstTr))
+    : pair.transcribeOnly ? "" : Lang.other(heardLang, pair);
   return (
     <div className="flex items-center px-1">
       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-raised">
@@ -494,7 +500,8 @@ function NoteBox({ text, icon }: { text: string; icon: ReactNode }) {
 function CorrectionBox({ pid, id, k }: { pid: string; id: number; k: Revision }) {
   const [open, setOpen] = useState(false);
   const before = k.heard.trim() ? k.heard : k.turns.map((t) => `${t.speaker}: ${t.heard}`).join(" / ");
-  const beforeTr = k.translation.trim() ? k.translation : k.turns.map((t) => `${t.speaker}: ${t.translation}`).join(" / ");
+  const beforeTr = k.translation.trim() ? k.translation
+    : k.turns.filter((t) => t.translation.trim()).map((t) => `${t.speaker}: ${t.translation}`).join(" / ");
   return (
     <div role="button" tabIndex={0} onClick={() => setOpen(!open)} onKeyDown={(e) => { if (e.key === "Enter") setOpen(!open); }}
       className="mt-2.5 w-full cursor-pointer rounded-[12px] border border-ok/35 bg-bg p-3">
@@ -514,13 +521,13 @@ function CorrectionBox({ pid, id, k }: { pid: string; id: number; k: Revision })
   );
 }
 
-/** Reads text (a translation) aloud in its language. Tap again to stop. */
-function SayButton({ text, k, saved }: { text: string; k: string; saved: boolean }) {
+/** Reads text (a translation, or the words of a piece without one) aloud in its language. Tap again to stop. */
+function SayButton({ text, k, saved, own }: { text: string; k: string; saved: boolean; own: boolean }) {
   const on = usePlay((s) => s.saying === k);
   const lang = Lang.of(text);
   const color = langColor(lang);
   return (
-    <button onClick={() => playAll.say(text, k)} aria-label={on ? "Stop" : `Speak the ${Lang.name(lang)} translation`}
+    <button onClick={() => playAll.say(text, k)} aria-label={on ? "Stop" : own ? `Read the ${Lang.name(lang)} text aloud` : `Speak the ${Lang.name(lang)} translation`}
       className="flex items-center rounded-2xl py-1.5 pl-2 pr-2.5"
       style={{ background: on ? `color-mix(in srgb, ${color} 20%, transparent)` : "var(--ll-control)" }}>
       {on ? <Square size={16} className="fill-current" style={{ color }} /> : <Volume2 size={18} style={{ color }} />}
@@ -530,14 +537,37 @@ function SayButton({ text, k, saved }: { text: string; k: string; saved: boolean
   );
 }
 
+/** Copies the words of a piece that has no translation. */
+function CopyButton({ c }: { c: Caption }) {
+  const copy = async () => {
+    const text = c.turns.length ? c.turns.map((t) => t.heard.trim()).join("\n") : c.heard.trim();
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Copied");
+    } catch (e) {
+      console.warn("copy failed", e);
+      toast("Couldn't copy");
+    }
+  };
+  return (
+    <button onClick={copy} aria-label="Copy the text"
+      className="flex items-center rounded-2xl bg-control py-1.5 pl-2 pr-2.5 text-text hover:bg-raised">
+      <Copy size={16} />
+      <span className="ml-1 text-[12px] font-semibold">Copy</span>
+    </button>
+  );
+}
+
 const engineLabel = (c: Caption) => (c.engine.startsWith("cloud:") ? "Gemini" : c.engine.startsWith("device:") || c.offline ? "On device" : "");
 
-function BubbleBody({ c, pid, playing, names }: { c: Caption; pid: string; playing: boolean; names: Record<number, string> }) {
+function BubbleBody({ c, pid, pairCode, playing, names }: { c: Caption; pid: string; pairCode: string; playing: boolean; names: Record<number, string> }) {
   const [explaining, setExplaining] = useState(false);
   const replaying = useReplay((s) => s.id === c.id);
   const done = isDone(c);
   const correction = correctionOf(c);
   const spoken = spokenText(c);
+  const own = textOnly(c);
+  const writing = pairOf(pairCode).transcribeOnly;
   const mineIsPlaying = replaying || playing;
 
   const runExplain = async () => {
@@ -561,11 +591,14 @@ function BubbleBody({ c, pid, playing, names }: { c: Caption; pid: string; playi
           {c.turns.map((t, i) => (
             <div key={i}>
               <TurnLabel t={t} pid={pid} names={names} />
-              <div className="text-[15px] leading-[22px] text-muted">{t.heard.trim()}</div>
+              <div className={own ? "whitespace-pre-wrap break-words text-[18px] font-medium leading-[30px] text-text" : "text-[15px] leading-[22px] text-muted"}>{t.heard.trim()}</div>
               {t.translation.trim() && <div className="text-[18px] font-medium leading-[26px] text-text">{t.translation.trim()}</div>}
             </div>
           ))}
         </div>
+      ) : own ? (
+        // Burmese stacks above and below the line, so it gets more height than a translation.
+        <div className="whitespace-pre-wrap break-words text-[19px] font-medium leading-[31px] text-text">{c.heard.trim()}</div>
       ) : (
         <>
           {original && (
@@ -575,9 +608,9 @@ function BubbleBody({ c, pid, playing, names }: { c: Caption; pid: string; playi
             </>
           )}
           {c.translation.trim() ? <div className="text-[19px] font-medium leading-[27px] text-text">{c.translation.trim()}</div>
-            : c.status === "QUEUED" ? <PendingLine text="Waiting to translate" color="var(--ll-thai)" />
+            : c.status === "QUEUED" ? <PendingLine text={writing ? "Waiting to write down" : "Waiting to translate"} color="var(--ll-thai)" />
             : c.status === "RECORDING" ? <PendingLine text="Recording" color="var(--ll-thai)" />
-            : <PendingLine text="Translating" color="var(--ll-english)" />}
+            : <PendingLine text={writing ? "Writing" : "Translating"} color="var(--ll-english)" />}
         </>
       )}
       {c.note && !done && <NoteBox text={c.note} icon={<Info size={16} className="text-thai" />} />}
@@ -594,7 +627,8 @@ function BubbleBody({ c, pid, playing, names }: { c: Caption; pid: string; playi
           </button>
         )}
         {(c.audioFile || c.durationMs > 0) && <span className="text-[12px] text-faint">{(c.durationMs / 1000).toFixed(1)} s</span>}
-        {done && spoken && <span className="ml-2.5"><SayButton text={spoken} k={String(c.id)} saved={savedVoice(c, spoken) != null} /></span>}
+        {done && spoken && <span className="ml-2.5"><SayButton text={spoken} k={String(c.id)} saved={savedVoice(c, spoken) != null} own={own} /></span>}
+        {own && <span className="ml-1.5"><CopyButton c={c} /></span>}
         {done && c.explanation == null && c.translation.trim() && (
           <button disabled={explaining} onClick={runExplain} className="ml-2.5 rounded-[10px] px-1.5 py-1 text-[12px] font-medium text-english hover:bg-raised">
             {explaining ? "Thinking…" : "What did they mean?"}
@@ -609,7 +643,7 @@ function BubbleBody({ c, pid, playing, names }: { c: Caption; pid: string; playi
 // ---------- Play all player ----------
 
 /** Plays the project in order: original voices, or the translations spoken. The mic keeps listening. */
-function PlayerBar({ wide }: { wide: boolean }) {
+function PlayerBar({ wide, textMode }: { wide: boolean; textMode: boolean }) {
   const mode = usePlay((s) => s.mode);
   const fast = usePlay((s) => s.fast);
   const [i, n] = usePlay((s) => s.position);
@@ -633,14 +667,14 @@ function PlayerBar({ wide }: { wide: boolean }) {
             <div className="flex items-center">
               {transport}
               <span className="ml-2 flex-1 truncate text-[12px] text-muted">{label}</span>
-              <ModeSegments mode={mode} />
+              <ModeSegments mode={mode} textMode={textMode} />
               <span className="ml-2"><SpeedPill fast={fast} /></span>
             </div>
           ) : (
             <>
               <div className="flex items-center"><span className="flex-1 text-[12px] text-muted">{label}</span><SpeedPill fast={fast} /></div>
               <div className="mt-1.5 flex items-center">
-                <ModeSegments mode={mode} className="flex-1" />
+                <ModeSegments mode={mode} textMode={textMode} className="flex-1" />
                 <span className="ml-2">{transport}</span>
               </div>
             </>
@@ -651,8 +685,8 @@ function PlayerBar({ wide }: { wide: boolean }) {
   );
 }
 
-function ModeSegments({ mode, className }: { mode: PlayMode; className?: string }) {
-  const opts: [PlayMode, string][] = [["ORIGINAL", "Original voices"], ["TRANSLATION", "Translations spoken"]];
+function ModeSegments({ mode, textMode, className }: { mode: PlayMode; textMode: boolean; className?: string }) {
+  const opts: [PlayMode, string][] = [["ORIGINAL", "Original voices"], ["TRANSLATION", textMode ? "Text read aloud" : "Translations spoken"]];
   return (
     <div className={cn("flex rounded-[12px] bg-bg p-[3px]", className)}>
       {opts.map(([m, text]) => (
@@ -726,13 +760,16 @@ function InputBar({ pid, pairCode, running, elsewhere, wide }: { pid: string; pa
   const [text, setText] = useState("");
   const pair = pairOf(pairCode);
   const canHold = running && source !== "PHONE";
+  const writing = pair.transcribeOnly;
+  const typeLabel = writing ? "Type to hear it" : "Type to translate";
 
-  const status = held && pair.code !== TH_EN.code ? "Speak now… release to translate"
+  const status = held && writing ? "Speak now… release to write it down"
+    : held && pair.code !== TH_EN.code ? "Speak now… release to translate"
     : held ? ptt.trim() || "Speak English now… release to translate"
     : running && source === "PHONE" ? `Phone audio · ${pair.label} · ${elapsed}`
-    : running ? `Listening · ${pair.label} auto-detected · ${elapsed}`
+    : running ? `Listening · ${pair.label}${writing ? "" : " auto-detected"} · ${elapsed}`
     : "Tap the mic to start listening";
-  const hint = held || running ? status : "Type to translate, or tap to listen";
+  const hint = held || running ? status : `${typeLabel}, or tap to listen`;
 
   const send = () => {
     const input = text.trim();
@@ -765,11 +802,11 @@ function InputBar({ pid, pairCode, running, elsewhere, wide }: { pid: string; pa
                 <span className="mr-1.5 h-[7px] w-[7px] shrink-0 rounded-full bg-live" />
                 <span className="truncate">Recording in {shownName(elsewhere)}</span>
               </div>
-              <div className="truncate text-[12px] text-faint">{wide ? "Type to translate, or tap to record here instead" : "Type, or tap to switch"}</div>
+              <div className="truncate text-[12px] text-faint">{wide ? `${typeLabel}, or tap to record here instead` : "Type, or tap to switch"}</div>
             </div>
           )}
           <textarea
-            value={text} rows={1} aria-label="Type to translate"
+            value={text} rows={1} aria-label={typeLabel}
             placeholder={elsewhere ? "" : hint}
             onChange={(e) => setText(e.target.value.replace(/\n/g, " "))}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
@@ -785,14 +822,17 @@ function InputBar({ pid, pairCode, running, elsewhere, wide }: { pid: string; pa
             <BarIcon label={phone ? "Listening to tab or phone audio" : "Listening to people in the room"} active={phone} onClick={toggleSource}>
               {phone ? <Monitor size={20} /> : <Users size={20} />}
             </BarIcon>
-            <BarIcon label={speak ? "Translations are read aloud" : "Captions only"} active={speak} onClick={() => setApp({ speakAloud: !speak })}>
-              {speak ? <Volume2 size={20} /> : <VolumeX size={20} />}
-            </BarIcon>
+            {/* Transcripts are never read out by themselves, so the switch would do nothing here. */}
+            {!writing && (
+              <BarIcon label={speak ? "Translations are read aloud" : "Captions only"} active={speak} onClick={() => setApp({ speakAloud: !speak })}>
+                {speak ? <Volume2 size={20} /> : <VolumeX size={20} />}
+              </BarIcon>
+            )}
           </>
         )}
         <div className="w-1" />
         {text.trim() ? (
-          <button aria-label="Translate" onClick={send} className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-english text-bg">
+          <button aria-label={writing ? "Read aloud" : "Translate"} onClick={send} className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-english text-bg">
             <Send size={20} />
           </button>
         ) : (

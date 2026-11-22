@@ -64,10 +64,13 @@ object Lang {
 enum class LangPair(val code: String, val a: String, val b: String) {
     TH_EN("th-en", Lang.TH, Lang.EN),
     TH_MY("th-my", Lang.TH, Lang.MY),
-    EN_MY("en-my", Lang.EN, Lang.MY);
+    EN_MY("en-my", Lang.EN, Lang.MY),
+    MY_ONLY("my", Lang.MY, Lang.MY);
 
-    val label get() = "${Lang.name(a)} ⇄ ${Lang.name(b)}"
-    val short get() = "${a.uppercase()} ⇄ ${b.uppercase()}"
+    /** One language: speech is written down and typed text is read aloud, nothing is translated. */
+    val transcribeOnly get() = a == b
+    val label get() = if (transcribeOnly) "${Lang.name(a)} only" else "${Lang.name(a)} ⇄ ${Lang.name(b)}"
+    val short get() = if (transcribeOnly) a.uppercase() else "${a.uppercase()} ⇄ ${b.uppercase()}"
     /** Only Thai ⇄ English has on-device speech recognition and translation. */
     val worksOffline get() = this == TH_EN
 
