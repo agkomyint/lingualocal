@@ -244,6 +244,9 @@ internal fun LogoMark(size: Dp) {
 @Composable
 private fun ProjectsHome(nav: Nav, dialogs: ProjectDialogs) {
     val projects by AppState.projects.collectAsStateWithLifecycle()
+    val running by AppState.running.collectAsStateWithLifecycle()
+    val live by AppState.live.collectAsStateWithLifecycle()
+    val recording = live.takeIf { running }
     var query by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
     var settings by remember { mutableStateOf(false) }
@@ -251,6 +254,7 @@ private fun ProjectsHome(nav: Nav, dialogs: ProjectDialogs) {
     val shown = projects.filter { query.isBlank() || it.name.contains(query.trim(), ignoreCase = true) }
 
     Column(Modifier.fillMaxSize()) {
+        if (recording != null) RecordingElsewhere(recording) { nav.open(recording.project.value) }
         Column(Modifier.weight(1f).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
             LazyColumn(
                 Modifier.widthIn(max = 720.dp).fillMaxSize(),
@@ -292,7 +296,7 @@ private fun ProjectsHome(nav: Nav, dialogs: ProjectDialogs) {
                     }
                 }
                 items(shown, key = { it.id }) { p ->
-                    SideRow(p, selected = false, live = false, onOpen = { nav.open(p) }, dialogs = dialogs)
+                    SideRow(p, selected = false, live = p.id == recording?.id, onOpen = { nav.open(p) }, dialogs = dialogs)
                 }
             }
         }

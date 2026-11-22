@@ -289,7 +289,7 @@ private fun ConversationContent(space: com.example.lingualocal.ProjectSpace, nav
             }
             if (!filtering) LatestButton(listState, rows.size)
             if (playing != null) PlayerBar(captions, wide)
-            InputBar(running, nav::toggleListening, wide)
+            InputBar(running, elsewhere, nav::toggleListening, wide)
         }
         if (asking && askSide) {
             Box(Modifier.width(1.dp).fillMaxSize().background(LL.Line))
@@ -419,9 +419,9 @@ private fun HeaderIcon(icon: ImageVector, label: String, active: Boolean = false
     ) { Icon(icon, contentDescription = label, tint = if (active) LL.English else LL.Muted, modifier = Modifier.size(20.dp)) }
 }
 
-/** Listening goes on in another project while this one is open: where, for how long, and the way back. */
+/** Listening goes on off screen (another project or the projects home): where, for how long, and the way back. */
 @Composable
-private fun RecordingElsewhere(live: com.example.lingualocal.ProjectSpace, onGoBack: () -> Unit) {
+internal fun RecordingElsewhere(live: com.example.lingualocal.ProjectSpace, onGoBack: () -> Unit) {
     val p by live.project.collectAsStateWithLifecycle()
     val name = if (p.name.startsWith("Untitled · ")) "Untitled" else p.name
     Row(
@@ -1038,7 +1038,7 @@ private fun Modifier.holdToSpeak(running: Boolean) = pointerInput(running) {
  * Right: hold to speak your side, or send what you typed. Everything lands in the same transcript.
  */
 @Composable
-private fun InputBar(running: Boolean, onToggle: () -> Unit, wide: Boolean) {
+private fun InputBar(running: Boolean, elsewhere: com.example.lingualocal.ProjectSpace?, onToggle: () -> Unit, wide: Boolean) {
     val space = LocalSpace.current
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -1068,7 +1068,8 @@ private fun InputBar(running: Boolean, onToggle: () -> Unit, wide: Boolean) {
             Spacer(Modifier.width(12.dp))
             Box(Modifier.weight(1f).heightIn(min = 44.dp), contentAlignment = Alignment.CenterStart) {
                 if (running && text.isEmpty()) WaveBars(running, Modifier.fillMaxWidth().height(26.dp).alpha(0.3f))
-                if (text.isEmpty()) Text(
+                if (text.isEmpty() && elsewhere != null) ElsewhereHint(elsewhere, wide)
+                else if (text.isEmpty()) Text(
                     hint, color = if (held) LL.Text else if (running) LL.Muted else LL.Faint,
                     fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
@@ -1103,7 +1104,12 @@ private fun InputBar(running: Boolean, onToggle: () -> Unit, wide: Boolean) {
                             if (canHold) Modifier.holdToSpeak(running)
                             else Modifier.clickable {
                                 android.widget.Toast.makeText(
-                                    context, if (running) "Hold to speak works with the mic, not phone audio" else "Tap listen first, then hold to speak",
+                                    context,
+                                    when {
+                                        running -> "Hold to speak works with the mic, not phone audio"
+                                        elsewhere != null -> "Recording in another project. Move it here to hold and speak"
+                                        else -> "Tap listen first, then hold to speak"
+                                    },
                                     android.widget.Toast.LENGTH_SHORT,
                                 ).show()
                             }
@@ -1117,6 +1123,24 @@ private fun InputBar(running: Boolean, onToggle: () -> Unit, wide: Boolean) {
                 }
             }
         }
+    }
+}
+
+/** The empty input while another project records: says so, and that the listen button moves the recording here. */
+@Composable
+private fun ElsewhereHint(live: com.example.lingualocal.ProjectSpace, wide: Boolean) {
+    val p by live.project.collectAsStateWithLifecycle()
+    val name = if (p.name.startsWith("Untitled · ")) "Untitled" else p.name
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(7.dp).clip(CircleShape).background(LL.Live))
+            Spacer(Modifier.width(6.dp))
+            Text("Recording in $name", color = LL.Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Text(
+            if (wide) "Type to translate, or tap to record here instead" else "Type, or tap to switch",
+            color = LL.Faint, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

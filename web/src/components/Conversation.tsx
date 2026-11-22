@@ -225,7 +225,7 @@ export function Conversation({ project, showBack }: { project: Project; showBack
           </div>
         )}
         {playing != null && <PlayerBar wide={wide} />}
-        <InputBar pid={pid} pairCode={project.pair} running={running} wide={wide} />
+        <InputBar pid={pid} pairCode={project.pair} running={running} elsewhere={elsewhere} wide={wide} />
       </div>
       {asking && askSide && (
         <>
@@ -331,7 +331,7 @@ function PairSwitch({ project }: { project: Project }) {
 }
 
 /** Listening goes on in another project while this one is open: where, for how long, and the way back. */
-function RecordingElsewhere({ project, onGoBack }: { project: Project; onGoBack: () => void }) {
+export function RecordingElsewhere({ project, onGoBack }: { project: Project; onGoBack: () => void }) {
   const elapsed = useElapsed(true);
   return (
     <>
@@ -716,7 +716,7 @@ function WaveBars({ running, className }: { running: boolean; className?: string
  * The one input. Left: listen to the people around (or tab audio), live. Middle: type your side.
  * Right: hold to speak your side, or send what you typed. Everything lands in the same transcript.
  */
-function InputBar({ pid, pairCode, running, wide }: { pid: string; pairCode: string; running: boolean; wide: boolean }) {
+function InputBar({ pid, pairCode, running, elsewhere, wide }: { pid: string; pairCode: string; running: boolean; elsewhere?: Project; wide: boolean }) {
   const held = useApp((s) => s.pushToTalk);
   const ptt = useApp((s) => s.pushToTalkStatus);
   const speak = useApp((s) => s.speakAloud);
@@ -758,9 +758,19 @@ function InputBar({ pid, pairCode, running, wide }: { pid: string; pairCode: str
         <ListenButton running={running} />
         <div className="relative ml-3 flex min-h-11 min-w-0 flex-1 items-center">
           {running && !text && <WaveBars running={running} className="pointer-events-none absolute inset-x-0 top-1/2 h-[26px] w-full -translate-y-1/2 opacity-30" />}
+          {elsewhere && !text && (
+            // Another project records: say so, and that the listen button moves the recording here.
+            <div className="pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 leading-[18px]">
+              <div className="flex items-center text-[13px] text-muted">
+                <span className="mr-1.5 h-[7px] w-[7px] shrink-0 rounded-full bg-live" />
+                <span className="truncate">Recording in {shownName(elsewhere)}</span>
+              </div>
+              <div className="truncate text-[12px] text-faint">{wide ? "Type to translate, or tap to record here instead" : "Type, or tap to switch"}</div>
+            </div>
+          )}
           <textarea
             value={text} rows={1} aria-label="Type to translate"
-            placeholder={hint}
+            placeholder={elsewhere ? "" : hint}
             onChange={(e) => setText(e.target.value.replace(/\n/g, " "))}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
             className={cn(
@@ -790,7 +800,7 @@ function InputBar({ pid, pairCode, running, wide }: { pid: string; pairCode: str
           <button
             aria-label="Hold to speak"
             onPointerDown={(e) => {
-              if (!canHold) { toast(running ? "Hold to speak works with the mic, not phone audio" : "Tap listen first, then hold to speak"); return; }
+              if (!canHold) { toast(running ? "Hold to speak works with the mic, not phone audio" : elsewhere ? "Recording in another project. Move it here to hold and speak" : "Tap listen first, then hold to speak"); return; }
               e.currentTarget.setPointerCapture(e.pointerId);
               setPushToTalk(true);
             }}

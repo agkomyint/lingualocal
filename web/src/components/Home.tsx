@@ -11,6 +11,7 @@ import { deleteProject, renameProject } from "@/lib/store";
 import * as nav from "@/lib/nav";
 import { ageGroup, dMonYear, hm, length } from "@/lib/format";
 import type { Project } from "@/lib/types";
+import { RecordingElsewhere } from "./Conversation";
 import { IconClose, KeyValue, Logo, Modal, NameDialog, SectionLabel, Switch, TextButton } from "./ui";
 
 // ---------- Project dialogs ----------
@@ -213,11 +214,18 @@ function StartCard() {
 
 export function ProjectsHome() {
   const projects = useApp((s) => s.projects);
+  const liveId = useApp((s) => (s.running ? s.liveId : null));
+  const recording = projects.find((p) => p.id === liveId);
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
   const shown = projects.filter((p) => !query.trim() || p.name.toLowerCase().includes(query.trim().toLowerCase()));
   return (
     <div className="h-full overflow-y-auto">
+      {recording && (
+        <div className="sticky top-0 z-10">
+          <RecordingElsewhere project={recording} onGoBack={() => nav.open(recording)} />
+        </div>
+      )}
       <div className="mx-auto w-full max-w-[720px] px-4 pb-4">
         <div className="flex items-center pb-3 pt-4">
           <Logo size={32} />
@@ -243,7 +251,7 @@ export function ProjectsHome() {
               : "No projects yet. A project keeps one situation together, like \"Landlord\" or \"Clinic visit\": every recording and translation, ready to play back."}
           </p>
         )}
-        {shown.map((p) => <SideRow key={p.id} p={p} selected={false} live={false} />)}
+        {shown.map((p) => <SideRow key={p.id} p={p} selected={false} live={p.id === liveId} />)}
       </div>
     </div>
   );
