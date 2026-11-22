@@ -339,7 +339,10 @@ object ProjectStore {
         if (c.preview.isNotBlank()) put("preview", c.preview) // the live grey words, kept as they were
         if (c.engine.isNotEmpty()) put("engine", c.engine)
         c.audioFile?.let { put("audio", File(it).name) } // by name: the folder may move (backup/restore)
-        c.voiceFile?.let { put("voice", File(it).name); put("voiceText", c.voiceText) }
+        c.voiceFile?.let {
+            put("voice", File(it).name); put("voiceText", c.voiceText)
+            if (c.voiceEngine.isNotEmpty()) put("voiceEngine", c.voiceEngine)
+        }
         c.explanation?.let { put("explanation", it) }
         c.explainSource?.let { put("explainSource", it) }
         put("mine", c.mine)
@@ -389,6 +392,7 @@ object ProjectStore {
         mine = j.optBoolean("mine"),
         voiceFile = j.optString("voice").takeIf { it.isNotEmpty() }?.let { File(audioDir, it) }?.takeIf { it.isFile }?.absolutePath,
         voiceText = j.optString("voiceText"),
+        voiceEngine = j.optString("voiceEngine"),
         source = j.optString("source"),
         speaker = if (j.has("speaker")) j.getInt("speaker") else null,
         turns = j.optJSONArray("turns")?.let { a ->

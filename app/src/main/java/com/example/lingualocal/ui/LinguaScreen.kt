@@ -26,9 +26,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
@@ -72,6 +75,9 @@ import com.example.lingualocal.R
 import com.example.lingualocal.Startup
 import com.example.lingualocal.audio.PlayAll
 import com.example.lingualocal.audio.SegmentAudio
+import com.example.lingualocal.audio.TranslationVoice
+import com.example.lingualocal.audio.VoiceEngine
+import com.example.lingualocal.audio.VoiceRules
 import com.example.lingualocal.data.ProjectStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.first
@@ -498,7 +504,8 @@ internal fun SettingsDialog(onClose: () -> Unit) {
     androidx.compose.ui.window.Dialog(onDismissRequest = onClose) {
         Column(
             Modifier.widthIn(max = 460.dp).fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(LL.Surface)
-                .border(1.dp, LL.LineStrong, RoundedCornerShape(24.dp)).padding(20.dp),
+                .border(1.dp, LL.LineStrong, RoundedCornerShape(24.dp))
+                .verticalScroll(androidx.compose.foundation.rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -515,7 +522,49 @@ internal fun SettingsDialog(onClose: () -> Unit) {
                 }
                 androidx.compose.material3.Switch(checked = speak, onCheckedChange = { AppState.speakAloud.value = it })
             }
+            VoiceRules.DEFAULTS.keys.forEach { VoiceRow(it) }
+            Column {
+                Text("Device: free, instant", color = LL.Muted, fontSize = 12.sp)
+                Text("Gemini: more natural, needs internet, paid", color = LL.Muted, fontSize = 12.sp)
+            }
             if (version.isNotBlank()) Text("LinguaLocal $version", color = LL.Faint, fontSize = 12.sp)
+        }
+    }
+}
+
+/** Device or Gemini for one language. */
+@Composable
+private fun VoiceRow(lang: String) {
+    val voices by AppState.voices.collectAsStateWithLifecycle()
+    val device by androidx.compose.runtime.produceState<Boolean?>(null, lang) { value = TranslationVoice.phoneSpeaks(lang) }
+    val noDevice = device == false
+    val shown = if (noDevice) VoiceEngine.GEMINI else voices[lang]?.engine
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("${com.example.lingualocal.data.Lang.name(lang)} voice", color = LL.Text, fontSize = 15.sp)
+            if (noDevice) Text("No voice on this device", color = LL.Muted, fontSize = 12.sp)
+        }
+        Spacer(Modifier.width(8.dp))
+        Row(Modifier.clip(RoundedCornerShape(20.dp)).background(LL.Raised).padding(3.dp).selectableGroup()) {
+            VoiceEngine.entries.forEach { engine ->
+                val on = shown == engine
+                val enabled = engine == VoiceEngine.GEMINI || !noDevice
+                Box(
+                    Modifier.height(34.dp).clip(RoundedCornerShape(17.dp))
+                        .background(if (on) LL.Control else LL.Raised)
+                        .selectable(selected = on, enabled = enabled, role = androidx.compose.ui.semantics.Role.RadioButton) {
+                            AppState.voices.value = VoiceRules.pick(AppState.voices.value, lang, engine, System.currentTimeMillis())
+                        }
+                        .padding(horizontal = 12.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        if (engine == VoiceEngine.DEVICE) "Device" else "Gemini",
+                        color = if (!enabled) LL.Faint.copy(alpha = 0.5f) else if (on) LL.Text else LL.Muted,
+                        fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
         }
     }
 }

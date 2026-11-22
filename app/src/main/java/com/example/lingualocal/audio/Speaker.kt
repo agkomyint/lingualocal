@@ -7,18 +7,41 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import com.example.lingualocal.AppState
-import java.util.Locale
+import com.example.lingualocal.ProjectSpace
+import com.example.lingualocal.data.Lang
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Reads translations aloud with the device's own voices (Thai and English).
- * It plays on the voice-call path so the phone's echo canceller removes it from the mic, and the app keeps
- * listening while it speaks. Anything that still leaks through is caught by [isEcho].
+ * Reads translations of [space] aloud with the voice picked for each language, the device's or Gemini's, one
+ * after another whichever it is. It plays on the voice-call path so the phone's echo canceller removes it from
+ * the mic, and the app keeps listening while it speaks. Anything that still leaks through is caught by [isEcho].
  */
-class Speaker(context: Context) {
-    @Volatile private var ready = false
+class Speaker(context: Context, private val space: ProjectSpace) {
+    private val ready = CompletableDeferred<Boolean>()
+    private val utterances = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val lock = Any()
+    private var last: Job? = null
+    private var closed = false
+
     private val tts: TextToSpeech = TextToSpeech(context.applicationContext) { status ->
-        ready = status == TextToSpeech.SUCCESS
-        Log.d("Speaker", "voices ready=$ready")
+        ready.complete(status == TextToSpeech.SUCCESS)
+        Log.d("Speaker", "voices ready=${status == TextToSpeech.SUCCESS}")
     }
 
     init {
@@ -29,33 +52,105 @@ class Speaker(context: Context) {
                 .build()
         )
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(id: String?) { AppState.ttsSpeaking.value = true }
-            override fun onDone(id: String?) { if (!tts.isSpeaking) AppState.ttsSpeaking.value = false }
+            override fun onStart(id: String?) = Unit
+            override fun onDone(id: String?) = ended(id)
+            override fun onStop(id: String?, interrupted: Boolean) = ended(id)
             @Deprecated("Deprecated in Java")
-            override fun onError(id: String?) { AppState.ttsSpeaking.value = false }
+            override fun onError(id: String?) = ended(id)
+            private fun ended(id: String?) {
+                id?.let { utterances.remove(it) }?.complete(Unit)
+            }
         })
     }
 
-    /** Queues [text] in its language (Thai if it has Thai letters, otherwise English). */
+    /** Queues [text] in the voice picked for its language. [id] is "seg-" or "ptt-" and the piece's number. */
     fun say(text: String, id: String, interrupt: Boolean = false) {
-        if (!ready || text.isBlank() || !AppState.speakAloud.value) return
-        // No voice for this language on the device (Burmese usually): Gemini reads it instead.
-        if (tts.setLanguage(com.example.lingualocal.data.Lang.locale(com.example.lingualocal.data.Lang.of(text))) < TextToSpeech.LANG_AVAILABLE) {
-            remember(text)
-            AppState.ttsSpeaking.value = true
-            val done = { if (!tts.isSpeaking) AppState.ttsSpeaking.value = false }
-            val piece = id.removePrefix("seg-").toLongOrNull()
-            // A piece: one Gemini request makes the voice, it's saved, and that copy is played (no second request).
-            if (piece != null) TranslationVoice.speakPiece(piece, done)
-            else com.example.lingualocal.ai.CloudVoice.speak(text, flush = interrupt, onDone = done)
-            return
+        if (text.isBlank() || !AppState.speakAloud.value) return
+        if (interrupt) stop()
+        synchronized(lock) {
+            if (closed) return
+            val before = last
+            val piece = id.substringAfter('-').toLongOrNull()
+            val job = scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    speak(text, piece, before)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // A voice that fails mustn't take listening down with it.
+                    Log.w("Speaker", "can't speak piece $piece", e)
+                }
+            }
+            last = job
+            job.invokeOnCompletion {
+                synchronized(lock) {
+                    if (last === job) {
+                        last = null
+                        AppState.ttsSpeaking.value = false
+                    }
+                }
+            }
+            job.start()
         }
+    }
+
+    private suspend fun speak(text: String, piece: Long?, before: Job?) = supervisorScope {
+        val c = piece?.let { space.caption(it) }
+        val wants = TranslationVoice.wantsGemini(space, c, text)
+        val online = TranslationVoice.online()
+        // Asked for straight away, so it's ready by its turn.
+        val early = if (wants && c != null && online) async { TranslationVoice.voiceFile(space, c.id, gemini = true) } else null
+        before?.join()
+        val started = withTimeoutOrNull(VOICE_START_MS) { ready.await() } == true
+        if (!started && !wants) return@supervisorScope
+        val lang = Lang.of(text)
+        val phone = started && tts.isLanguageAvailable(Lang.locale(lang)) >= TextToSpeech.LANG_AVAILABLE
+
+        val path = when {
+            // With a phone voice to fall back on, a slow Gemini mustn't hold up the queue.
+            early != null && phone -> withTimeoutOrNull(GEMINI_WAIT_MS) { early.await() }.also { if (it == null) early.cancel() }
+            early != null -> early.await()
+            !phone && c != null -> TranslationVoice.voiceFile(space, c.id, gemini = false)
+            else -> null
+        }
+        currentCoroutineContext().ensureActive()
+        if (path == null && !phone && c != null) return@supervisorScope
+        // Noted as the sound starts: Gemini's can come seconds later.
         remember(text)
         AppState.ttsSpeaking.value = true
-        tts.speak(text, if (interrupt) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, id)
+        when {
+            path != null -> TranslationVoice.playSaved(path)
+            phone -> speakOnPhone(text, lang)
+            else -> {
+                // Not a piece: nowhere to save it.
+                val done = CompletableDeferred<Unit>()
+                com.example.lingualocal.ai.CloudVoice.speak(text, flush = false, onDone = { done.complete(Unit) })
+                done.await()
+            }
+        }
+        AppState.ttsSpeaking.value = false
+    }
+
+    private suspend fun speakOnPhone(text: String, lang: String) {
+        val id = "live-${System.nanoTime()}"
+        val done = CompletableDeferred<Unit>()
+        utterances[id] = done
+        try {
+            tts.setLanguage(Lang.locale(lang))
+            currentCoroutineContext().ensureActive()
+            if (tts.speak(text, TextToSpeech.QUEUE_ADD, null, id) != TextToSpeech.SUCCESS) return
+            // An engine that never reports the end mustn't hold up the pieces after it.
+            withTimeoutOrNull(10_000L + text.length * 250L) { done.await() }
+        } finally {
+            utterances.remove(id)
+        }
     }
 
     fun stop() {
+        synchronized(lock) {
+            last = null
+            scope.coroutineContext.cancelChildren()
+        }
         tts.stop()
         com.example.lingualocal.ai.CloudVoice.stop()
         TranslationVoice.stopSpeaking()
@@ -63,12 +158,16 @@ class Speaker(context: Context) {
     }
 
     fun close() {
-        ready = false
+        synchronized(lock) { closed = true }
+        scope.cancel()
         tts.shutdown()
         AppState.ttsSpeaking.value = false
     }
 
     companion object {
+        /** How long a translation waits for Gemini before the device's voice reads it. */
+        private const val GEMINI_WAIT_MS = 20_000L
+        private const val VOICE_START_MS = 5_000L
         private const val ECHO_WINDOW_MS = 30_000L
 
         /** What the app played recently (text, time), to recognise its own audio coming back through the mic. */
@@ -86,9 +185,13 @@ class Speaker(context: Context) {
 
         /** True if [heard] is just something the app itself played recently, picked up again by the mic. */
         fun isEcho(heard: String): Boolean {
+            return recentlySaid().any { looksLikeEcho(heard, it) }
+        }
+
+        /** What the app said in the last 30 s. */
+        fun recentlySaid(): List<String> {
             val now = SystemClock.elapsedRealtime()
-            val said = synchronized(recent) { recent.filter { now - it.second <= ECHO_WINDOW_MS }.map { it.first } }
-            return said.any { looksLikeEcho(heard, it) }
+            return synchronized(recent) { recent.filter { now - it.second <= ECHO_WINDOW_MS }.map { it.first } }
         }
 
         private fun normalize(t: String) = t.lowercase().filter { it.isLetterOrDigit() }

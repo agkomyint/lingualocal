@@ -7,6 +7,7 @@ import { loadCore } from "@/lib/audio";
 import { startAutoSave, uploadPending, watchProjects } from "@/lib/store";
 import { startVoiceCatchUp } from "@/lib/speak";
 import { startNamer } from "@/lib/namer";
+import { loadSettings } from "@/lib/settings";
 import { refreshStatus } from "@/lib/hybrid";
 import { forProject } from "@/lib/ask";
 import { Conversation } from "./Conversation";
@@ -21,6 +22,7 @@ let started: Promise<void> | null = null;
 /** Firebase (App Check, anonymous sign-in), the audio core, then the projects; background jobs after. */
 function startup(onProgress: (p: number) => void): Promise<void> {
   return (started ??= (async () => {
+    loadSettings();
     await firebase();
     onProgress(0.4);
     await loadCore();

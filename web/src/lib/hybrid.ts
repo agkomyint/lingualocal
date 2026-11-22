@@ -131,7 +131,7 @@ export function sendTyped(pid: string, input: string) {
   }));
   if (pair.transcribeOnly) {
     // Typed here to be heard, so it plays whatever the speaker switch says; the voice is saved with the piece.
-    say(input, String(id));
+    say(input, String(id), pid);
     return;
   }
   (async () => {
@@ -144,7 +144,7 @@ export function sendTyped(pid: string, input: string) {
         ...c, translation: t, status: "DONE", note: null, offline: onDevice,
         engine: onDevice ? Lang.DEVICE_ENGINE : Lang.cloudEngine(CLOUD_TEXT_MODEL),
       }));
-      if (app().speakAloud) say(t, String(id));
+      if (app().speakAloud) say(t, String(id), pid);
     } catch (e) {
       updateCaption(pid, id, (c) => ({
         ...c, status: "QUEUED",

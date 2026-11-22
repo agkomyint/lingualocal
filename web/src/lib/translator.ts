@@ -159,7 +159,7 @@ function apply(pid: string, pair: LangPair, id: number, json: Record<string, unk
   if (words) {
     identifyPeople(pid, id, pcm, voicedMs, split.length ? timed : []);
     // A transcript is never read out by itself: the mic would hear it.
-    if (!only) say(translation, `seg-${id}`);
+    if (!only) say(translation, `seg-${id}`, false, pid);
   }
 }
 

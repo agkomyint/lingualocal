@@ -7,7 +7,9 @@ import { getLiveGenerativeModel, ResponseModality, type LiveSession, type LiveGe
 import { fbNow } from "./firebase";
 import { LIVE_MODEL, PREVIEW_PROMPT } from "./config";
 import { EN, TH, MY, type LangPair } from "./lang";
-import { caption, pairFor, setApp, updateCaption } from "./state";
+import { caption, captionsOf, pairFor, setApp, updateCaption, useApp } from "./state";
+import { cleanPreview } from "./preview";
+import { recentlySaid } from "./speak";
 import { base64 } from "./audio";
 import { isDone } from "./types";
 
@@ -31,18 +33,28 @@ export function keepPairScripts(text: string, pair: LangPair): string | null {
   return chars.filter((ch) => { const s = scriptOf(ch); return s == null || allowed.has(s); }).join("");
 }
 
+const ABOVE = 2;
+const ABOVE_MS = 30_000;
+
 export class LiveInterpreter {
   private session: LiveSession | null = null;
   private lastSegment = -1;
   private stopped = false;
   private model: LiveGenerativeModel;
   private wake: (() => void) | null = null;
+  /** The live words of each unfinished piece as they came, and what doesn't belong in them. */
+  private previews = new Map<number, { raw: string; spoken: Set<string>; above: Set<string> }>();
+  private unwatch: () => void;
 
   constructor(private pid: string) {
     this.model = getLiveGenerativeModel(fbNow().ai, {
       model: LIVE_MODEL,
       generationConfig: { responseModalities: [ResponseModality.AUDIO], inputAudioTranscription: {} },
       systemInstruction: PREVIEW_PROMPT,
+    });
+    // The piece above often gets its final words after they leaked into this one.
+    this.unwatch = useApp.subscribe((s, p) => {
+      if (s.captions[this.pid] !== p.captions[this.pid]) for (const id of this.previews.keys()) this.showPreview(id);
     });
     this.loop();
   }
@@ -58,6 +70,7 @@ export class LiveInterpreter {
 
   stop() {
     this.stopped = true;
+    this.unwatch();
     this.session?.close().catch(() => {});
     this.session = null;
     this.wake?.();
@@ -106,6 +119,23 @@ export class LiveInterpreter {
     if (t == null) return;
     const target = caption(this.pid, this.lastSegment);
     if (!target || target.mine || isDone(target)) return;
-    updateCaption(this.pid, target.id, (c) => (isDone(c) ? c : { ...c, preview: c.preview + t }));
+    let p = this.previews.get(target.id);
+    if (!p) this.previews.set(target.id, (p = { raw: target.preview, spoken: new Set(), above: new Set() }));
+    p.raw += t;
+    this.showPreview(target.id);
+  }
+
+  private showPreview(id: number) {
+    const p = this.previews.get(id);
+    if (!p) return;
+    const list = captionsOf(this.pid);
+    const at = list.findIndex((c) => c.id === id);
+    if (at < 0 || isDone(list[at])) { this.previews.delete(id); return; }
+    const card = list[at];
+    recentlySaid().forEach((t) => p.spoken.add(t));
+    for (const c of list.slice(Math.max(0, at - ABOVE), at))
+      if (!c.mine && c.heard && c.time + (c.durationMs ?? 0) >= card.time - ABOVE_MS) p.above.add(c.heard);
+    const shown = cleanPreview(p.raw, p.spoken, p.above);
+    updateCaption(this.pid, id, (c) => (isDone(c) || c.preview === shown ? c : { ...c, preview: shown }));
   }
 }

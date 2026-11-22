@@ -55,6 +55,10 @@ class LiveInterpreter(private val space: com.example.lingualocal.ProjectSpace) {
     /** The card whose audio was streamed last: live words belong to it, not to a card that just started. */
     @Volatile private var lastSegment = -1L
 
+    /** The live words of each unfinished piece as they came, and what doesn't belong in them. */
+    private class Preview(var raw: String, val spoken: MutableSet<String> = linkedSetOf(), val above: MutableSet<String> = linkedSetOf())
+    private val previews = HashMap<Long, Preview>()
+
     suspend fun run(audio: ReceiveChannel<AudioChunk>) = coroutineScope {
         launch {
             for (chunk in audio) {
@@ -69,6 +73,8 @@ class LiveInterpreter(private val space: com.example.lingualocal.ProjectSpace) {
                 }
             }
         }
+        // The piece above often gets its final words after they leaked into this one.
+        launch { space.captions.collect { synchronized(previews) { previews.keys.toList().forEach(::showPreview) } } }
         connectLoop()
     }
 
@@ -121,7 +127,26 @@ class LiveInterpreter(private val space: com.example.lingualocal.ProjectSpace) {
         val t = keepPairScripts(raw, space.pair) ?: return
         // Show it on the card whose audio it came from (words arrive a little after the audio).
         val target = space.caption(lastSegment)?.takeIf { !it.mine && !it.done } ?: return
-        space.updateCaption(target.id) { if (it.done) it else it.copy(preview = it.preview + t) }
+        synchronized(previews) {
+            previews.getOrPut(target.id) { Preview(target.preview) }.raw += t
+            showPreview(target.id)
+        }
+    }
+
+    private fun showPreview(id: Long) {
+        val p = previews[id] ?: return
+        val list = space.captions.value
+        val at = list.indexOfLast { it.id == id }
+        if (at < 0 || list[at].done) {
+            previews.remove(id)
+            return
+        }
+        val card = list[at]
+        p.spoken += com.example.lingualocal.audio.Speaker.recentlySaid()
+        for (c in list.subList(maxOf(0, at - ABOVE), at))
+            if (!c.mine && c.heard.isNotBlank() && c.time + c.durationMs >= card.time - ABOVE_MS) p.above += c.heard
+        val shown = PreviewText.clean(p.raw, p.spoken, p.above)
+        space.updateCaption(id) { if (it.done || it.preview == shown) it else it.copy(preview = shown) }
     }
 
     /**
@@ -149,6 +174,8 @@ class LiveInterpreter(private val space: com.example.lingualocal.ProjectSpace) {
 
     private companion object {
         const val TAG = "LiveInterpreter"
+        const val ABOVE = 2
+        const val ABOVE_MS = 30_000L
         const val MIME_PCM_16K = "audio/pcm;rate=16000"
     }
 }

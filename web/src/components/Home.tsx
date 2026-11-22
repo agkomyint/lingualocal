@@ -6,7 +6,9 @@ import { DropdownMenu } from "radix-ui";
 import { Mic, Plus, Search, Settings as SettingsIcon, MoreVertical } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useApp, setApp, app } from "@/lib/state";
-import { MY_ONLY, PAIRS, pairOf, langColor } from "@/lib/lang";
+import { EN, Lang, MY, MY_ONLY, PAIRS, TH, pairOf, langColor } from "@/lib/lang";
+import { setVoice } from "@/lib/settings";
+import { hasDeviceVoice } from "@/lib/speak";
 import { deleteProject, renameProject } from "@/lib/store";
 import * as nav from "@/lib/nav";
 import { ageGroup, dMonYear, hm, length } from "@/lib/format";
@@ -97,9 +99,52 @@ function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void 
           </div>
           <Switch checked={speak} onChange={(v) => setApp({ speakAloud: v })} label="Speak translations" />
         </div>
+        {[EN, TH, MY].map((lang) => <VoiceRow key={lang} lang={lang} />)}
+        <div className="text-[12px] text-muted">
+          <div>Device: free, instant</div>
+          <div>Gemini: more natural, needs internet, paid</div>
+        </div>
         <div className="text-[12px] text-faint">LinguaLocal {process.env.NEXT_PUBLIC_APP_VERSION ?? "web"}</div>
       </div>
     </Modal>
+  );
+}
+
+/** Device or Gemini for one language. */
+function VoiceRow({ lang }: { lang: string }) {
+  const picked = useApp((s) => s.voices[lang].engine);
+  const [, setLoads] = useState(0);
+  // The browser lists its voices a moment after the page opens.
+  useEffect(() => {
+    if (typeof speechSynthesis === "undefined") return;
+    const loaded = () => setLoads((n) => n + 1);
+    speechSynthesis.addEventListener("voiceschanged", loaded);
+    return () => speechSynthesis.removeEventListener("voiceschanged", loaded);
+  }, []);
+  const device = hasDeviceVoice(lang);
+  const shown = device ? picked : "gemini";
+  const name = `${Lang.name(lang)} voice`;
+  return (
+    <div className="flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-[15px] text-text">{name}</div>
+        {!device && <div className="text-[12px] text-muted">No voice on this device</div>}
+      </div>
+      <div className="flex shrink-0 gap-0.5 rounded-[20px] bg-raised p-[3px]" role="radiogroup" aria-label={name}>
+        {(["device", "gemini"] as const).map((v) => (
+          <button
+            key={v} role="radio" aria-checked={shown === v} disabled={v === "device" && !device}
+            onClick={() => setVoice(lang, v)}
+            className={cn(
+              "h-[34px] rounded-[17px] px-3 text-[13px] font-bold disabled:opacity-40",
+              shown === v ? "bg-control text-text" : "text-muted",
+            )}
+          >
+            {v === "device" ? "Device" : "Gemini"}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

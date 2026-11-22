@@ -1,7 +1,11 @@
 "use client";
 import { create } from "zustand";
 import { type AudioSource, type Caption, type Project, type WaveBar, newCaption as makeCaption, SOURCE_MIC, SOURCE_PHONE } from "./types";
-import { pairOf, type LangPair } from "./lang";
+import { EN, MY, TH, pairOf, type LangPair } from "./lang";
+
+export type Voice = "device" | "gemini";
+/** The voice picked for a language, and when it was picked. */
+export interface VoiceChoice { engine: Voice; since: number }
 
 /** Everything the screens show, like AppState on Android. */
 export interface AppState {
@@ -24,6 +28,8 @@ export interface AppState {
   bufferedBytes: number;
   inputGain: number;
   speakAloud: boolean;
+  /** Which voice speaks each language in translation projects. */
+  voices: Record<string, VoiceChoice>;
   pushToTalk: boolean;
   ttsSpeaking: boolean;
   /** Start of the listening session (ms), 0 when not listening. */
@@ -47,7 +53,9 @@ export const useApp = create<AppState>(() => ({
   liveStatus: "Idle", vadStatus: "Not loaded", nanoStatus: "Checking…", nanoReady: false, offlineStatus: "Checking…",
   speakerStatus: "Not loaded", pushToTalkStatus: "Checking…",
   micLevel: 0, vadProbability: 0, speechActive: false, waveform: [], bufferedBytes: 0, inputGain: 1,
-  speakAloud: true, pushToTalk: false, ttsSpeaking: false, session: 0,
+  speakAloud: true,
+  voices: { [EN]: { engine: "device", since: 0 }, [TH]: { engine: "device", since: 0 }, [MY]: { engine: "gemini", since: 0 } },
+  pushToTalk: false, ttsSpeaking: false, session: 0,
   projects: [], viewId: null, liveId: null, captions: {}, nextPair: null, names: {}, toast: null,
 }));
 

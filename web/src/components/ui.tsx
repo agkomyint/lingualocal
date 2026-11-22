@@ -53,7 +53,7 @@ export function Modal({ open, onClose, title, children, className, hideTitle }: 
         <Dialog.Content
           aria-describedby={undefined}
           className={cn(
-            "fixed left-1/2 top-1/2 z-50 w-[calc(100%-32px)] max-w-[460px] -translate-x-1/2 -translate-y-1/2 rounded-[24px] border border-line-strong bg-surface p-5 animate-[ll-fade-in_150ms_ease-out]",
+            "fixed left-1/2 top-1/2 z-50 max-h-[calc(100dvh-32px)] overflow-y-auto w-[calc(100%-32px)] max-w-[460px] -translate-x-1/2 -translate-y-1/2 rounded-[24px] border border-line-strong bg-surface p-5 animate-[ll-fade-in_150ms_ease-out]",
             className,
           )}
         >

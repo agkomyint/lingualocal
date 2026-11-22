@@ -129,7 +129,7 @@ class ListenService : LifecycleService() {
     private suspend fun runPipeline() = coroutineScope {
         AppState.session = System.currentTimeMillis()
         AppState.running.value = true
-        val speaker = Speaker(applicationContext)
+        val speaker = Speaker(applicationContext, space)
         val translator = SegmentTranslator(applicationContext, finishing, speaker, space)
         // Voice fingerprints for "who is speaking" (on-device, ONNX Runtime). Loads in the background.
         val speakers = async(Dispatchers.Default) {

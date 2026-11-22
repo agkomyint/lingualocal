@@ -7,7 +7,7 @@ import { create } from "zustand";
 import { Lang } from "./lang";
 import { app, toast } from "./state";
 import { audioBlob } from "./store";
-import { alwaysGemini, hasDeviceVoice, playBlob, remember, savedVoice, sayOnTap, spokenText, stop as stopSpeaker, stopPlayer, voiceFile, voiceProblem, currentPlayer } from "./speak";
+import { alwaysGemini, autoGemini, hasDeviceVoice, playBlob, remember, savedVoice, sayOnTap, speakDevice, spokenText, stop as stopSpeaker, stopPlayer, voiceFile, voiceProblem, wantsGemini, currentPlayer } from "./speak";
 import type { Caption } from "./types";
 
 export type PlayMode = "ORIGINAL" | "TRANSLATION";
@@ -49,15 +49,15 @@ export function start(items: Caption[], fromId?: number) {
   play(i >= 0 ? i : 0);
 }
 
-/** Reads one translation aloud, on tap. Tapping the same one again stops it. */
-export function say(text: string, key: string) {
+/** Reads one translation aloud, on tap. Tapping the same one again stops it. [pid] is the piece's project. */
+export function say(text: string, key: string, pid = app().viewId) {
   if (st().saying === key) { stopSpeaker(); set({ saying: null }); return; }
   stop();
   if (!text.trim()) return;
   sayOnTap(text, key, (on) => {
     if (on) set({ saying: key });
     else if (st().saying === key) set({ saying: null });
-  });
+  }, pid);
 }
 
 export function stop() {
@@ -111,31 +111,28 @@ async function speak(c: Caption, gen: number) {
   remember(text);
   const pid = app().viewId;
   const saved = savedVoice(c, text);
-  if (saved) {
+  const wants = wantsGemini(pid, c, text);
+  const lang = Lang.of(text);
+  const device = !(pid && alwaysGemini(pid, c)) && hasDeviceVoice(lang);
+  if (saved && (wants || !device)) {
     const b = await audioBlob(saved);
     if (gen !== generation) return;
     if (b) { await playBlob(b, speed()); return; }
   }
-  const lang = Lang.of(text);
-  if (!(pid && alwaysGemini(pid, c)) && hasDeviceVoice(lang)) {
-    await new Promise<void>((resolve) => {
-      const u = new SpeechSynthesisUtterance(text);
-      const v = speechSynthesis.getVoices().find((x) => x.lang.toLowerCase().startsWith(Lang.locale(lang).slice(0, 2)));
-      if (v) u.voice = v;
-      u.lang = Lang.locale(lang);
-      u.rate = speed();
-      u.onend = () => resolve();
-      u.onerror = () => resolve();
-      speechSynthesis.speak(u);
-    });
-    return;
-  }
+  const onDevice = () => new Promise<void>((resolve) => { speakDevice(text, lang, resolve, speed()); });
+  // Playing everything never remakes old pieces: only a tap on one does.
+  if (device && !(wants && pid && navigator.onLine && autoGemini(pid, c, text))) { await onDevice(); return; }
   // Made once by Gemini and saved, so playing again later is free.
   const path = pid ? await voiceFile(pid, c.id) : null;
   if (gen !== generation) return;
   const b = path ? await audioBlob(path) : null;
-  if (!b) { toast(voiceProblem(pid, c.id)); return; }
   if (gen !== generation) return;
+  remember(text);
+  if (!b) {
+    if (device) await onDevice();
+    else toast(voiceProblem(pid, c.id));
+    return;
+  }
   await playBlob(b, speed());
 }
 

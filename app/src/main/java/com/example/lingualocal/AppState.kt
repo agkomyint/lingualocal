@@ -78,6 +78,8 @@ data class Caption(
     /** The translation spoken aloud, saved so it plays offline (WAV), and the text it was made from. */
     val voiceFile: String? = null,
     val voiceText: String = "",
+    /** What made [voiceFile]: an audio.VoiceEngine id. Empty = saved before this was noted. */
+    val voiceEngine: String = "",
 ) {
     companion object {
         const val SOURCE_MIC = "mic"
@@ -162,6 +164,9 @@ object AppState {
 
     /** Speak translations out loud. Off = text only, and the mic never pauses for our own voice. */
     val speakAloud = MutableStateFlow(true)
+
+    /** Which voice speaks each language in translation projects. */
+    val voices = MutableStateFlow<Map<String, com.example.lingualocal.audio.VoiceChoice>>(com.example.lingualocal.audio.VoiceRules.DEFAULTS)
 
     /** All projects on the phone, most recently used first. */
     val projects = MutableStateFlow<List<Project>>(emptyList())

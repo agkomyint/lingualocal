@@ -1,6 +1,7 @@
 "use client";
 /**
- * Speaking translations: the browser's voices where it has one, Gemini's voice otherwise (Burmese).
+ * Speaking translations: the voice picked for each language, the browser's or Gemini's. Gemini also speaks
+ * the languages the browser has no voice for, and the browser steps in when Gemini can't be reached.
  * In a one-language project every piece, typed or spoken, gets Gemini's voice and is saved by itself.
  * Port of Speaker.kt, CloudVoice.kt and TranslationVoice.kt.
  */
@@ -22,7 +23,7 @@ const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 /** Notes text the app is about to speak, so the mic picking it up isn't translated again. */
 export function remember(text: string) {
   const now = Date.now();
-  said.push({ text: norm(text), at: now });
+  said.push({ text, at: now });
   while (said.length && said[0].at < now - ECHO_WINDOW_MS) said.shift();
 }
 
@@ -48,7 +49,15 @@ export function isEcho(heard: string) {
   const now = Date.now();
   const h = norm(heard);
   if (!h) return false;
-  return said.some((x) => x.at >= now - ECHO_WINDOW_MS && ((h.length >= 4 && x.text.includes(h)) || dice(h, x.text) >= 0.6));
+  return said.some((x) => {
+    const s = norm(x.text);
+    return x.at >= now - ECHO_WINDOW_MS && ((h.length >= 4 && s.includes(h)) || dice(h, s) >= 0.6);
+  });
+}
+/** What the app said in the last 30 s. */
+export function recentlySaid(): string[] {
+  const since = Date.now() - ECHO_WINDOW_MS;
+  return said.filter((x) => x.at >= since).map((x) => x.text);
 }
 
 // ---------- Browser voices ----------
@@ -62,12 +71,12 @@ function voiceFor(lang: string): SpeechSynthesisVoice | null {
 export const hasDeviceVoice = (lang: string) => voiceFor(lang) != null;
 if (typeof speechSynthesis !== "undefined") speechSynthesis.getVoices();
 
-function speakDevice(text: string, lang: string, onEnd: () => void): SpeechSynthesisUtterance {
+export function speakDevice(text: string, lang: string, onEnd: () => void, rate = 1): SpeechSynthesisUtterance {
   const u = new SpeechSynthesisUtterance(text);
   const v = voiceFor(lang);
   if (v) u.voice = v;
   u.lang = Lang.locale(lang);
-  u.rate = 1;
+  u.rate = rate;
   u.onend = onEnd;
   u.onerror = onEnd;
   speechSynthesis.speak(u);
@@ -180,6 +189,21 @@ export const savedVoice = (c: Caption, text: string) => (c.voiceFile && c.voiceT
 /** A piece of a one-language project: always Gemini's voice, even where the browser has one, so it can be saved. */
 export const alwaysGemini = (pid: string, c: Caption) => textOnly(c) && pairFor(pid).transcribeOnly;
 
+/** Gemini's voice is wanted for this piece: the setting of the language being spoken. */
+export const wantsGemini = (pid: string | null | undefined, c: Caption | undefined, text: string) =>
+  (!!pid && !!c && alwaysGemini(pid, c)) || app().voices[Lang.of(text)]?.engine === "gemini";
+
+/**
+ * Gemini's voice is made by itself: always in a one-language project, else for pieces since Gemini was picked.
+ * Untranslated speech in a translation project isn't paid for.
+ */
+export function autoGemini(pid: string, c: Caption, text: string) {
+  if (alwaysGemini(pid, c)) return true;
+  if (c.source !== SOURCE_TYPED && textOnly(c)) return false;
+  const v = app().voices[Lang.of(text)];
+  return v?.engine === "gemini" && c.time >= v.since;
+}
+
 const inFlight = new Map<string, Promise<string | null>>();
 /** Why a piece's voice last failed, to show instead of guessing. */
 const problems = new Map<string, string>();
@@ -249,28 +273,27 @@ export function voiceFile(pid: string, id: number): Promise<string | null> {
 /** Makes the voices of recent finished pieces ahead of time, for languages the browser can't speak. */
 export function startVoiceCatchUp() {
   const checked = new Map<string, Caption>();
-  // One-language pieces seen unfinished or recent: voiced when they can be, however late that is.
+  // Pieces seen unfinished or recent: Gemini's voice is made when it can be, however late that is.
   const due = new Set<string>();
   const run = () => {
     const s = app();
     const active = [s.running ? s.liveId : null, s.viewId];
-    // A one-language project keeps saving its voices after it's left.
+    // Gemini's voices keep being saved after a project is left.
     for (const pid of Object.keys(s.captions)) {
-      const oneLanguage = pairFor(pid).transcribeOnly;
-      if (!oneLanguage && !active.includes(pid)) continue;
       for (const c of s.captions[pid] ?? []) {
         const k = `${pid}|${c.id}`;
         if (checked.get(k) === c) continue;
         const recent = c.time >= Date.now() - CATCH_UP_WINDOW_MS;
-        if (oneLanguage && (recent || c.status !== "DONE")) due.add(k);
+        if (recent || c.status !== "DONE") due.add(k);
         if (c.status !== "DONE") continue;
-        if (!recent && !(due.has(k) && (tries.get(`${k}|${spokenText(c)}`) ?? 0) < MAX_LATE_TRIES)) { checked.set(k, c); continue; }
-        const gemini = alwaysGemini(pid, c);
-        // Untranslated speech in a translation project isn't paid for.
-        if (!gemini && c.source !== SOURCE_TYPED && textOnly(c)) continue;
         const text = spokenText(c);
+        const auto = autoGemini(pid, c, text);
+        if (!recent && !(auto && due.has(k) && (tries.get(`${k}|${text}`) ?? 0) < MAX_LATE_TRIES)) { checked.set(k, c); continue; }
+        if (!auto && !active.includes(pid)) continue;
+        // Untranslated speech in a translation project isn't paid for.
+        if (!auto && c.source !== SOURCE_TYPED && textOnly(c)) continue;
         if (!text) continue;
-        if (savedVoice(c, text) || (!gemini && hasDeviceVoice(Lang.of(text)))) { checked.set(k, c); continue; }
+        if (savedVoice(c, text) || (!auto && hasDeviceVoice(Lang.of(text)))) { checked.set(k, c); continue; }
         if ((failed.get(`${pid}|${c.id}|${text}`) ?? 0) > Date.now() - RETRY_MS) continue;
         if (!navigator.onLine) continue;
         voiceFile(pid, c.id);
@@ -278,22 +301,34 @@ export function startVoiceCatchUp() {
     }
   };
   let t: ReturnType<typeof setTimeout> | null = null;
-  useApp.subscribe((s, p) => { if (s.captions !== p.captions && !t) t = setTimeout(() => { t = null; run(); }, 1500); });
+  useApp.subscribe((s, p) => {
+    if (s.voices !== p.voices) checked.clear();
+    if ((s.captions !== p.captions || s.voices !== p.voices) && !t) t = setTimeout(() => { t = null; run(); }, 1500);
+  });
   setInterval(run, RETRY_MS);
   if (typeof window !== "undefined") window.addEventListener("online", run);
 }
 
 // ---------- Speaker: reads translations aloud while listening ----------
 
-const queue: { text: string; id: string }[] = [];
+/** How long a live translation waits for Gemini before the browser's voice reads it. */
+const GEMINI_WAIT_MS = 20_000;
+
+interface Item { text: string; pid: string | null; n: number; voice: Promise<string | null> | null }
+const queue: Item[] = [];
 let busy = false;
 let gen = 0;
 
 /** Speaks a translation (queued after anything already speaking; interrupt cuts it off). */
-export function say(text: string, id: string, interrupt = false) {
+export function say(text: string, id: string, interrupt = false, pid: string | null = app().liveId) {
   if (!text.trim() || !app().speakAloud) return;
   if (interrupt) stop();
-  queue.push({ text, id });
+  const n = id.startsWith("seg-") ? Number(id.slice(4)) : NaN;
+  const c = pid && Number.isFinite(n) ? caption(pid, n) : undefined;
+  // Asked for straight away, so it's ready by its turn. Offline, the browser's voice speaks instead.
+  const voice = pid && c && wantsGemini(pid, c, text) && (navigator.onLine || savedVoice(c, spokenText(c)))
+    ? voiceFile(pid, n) : null;
+  queue.push({ text, pid, n, voice });
   if (!busy) next();
 }
 
@@ -301,18 +336,32 @@ function next() {
   const item = queue.shift();
   if (!item) { busy = false; setApp({ ttsSpeaking: false }); return; }
   busy = true;
-  setApp({ ttsSpeaking: true });
   const g = gen;
   const done = () => { if (g === gen) next(); };
-  const lang = Lang.of(item.text);
-  remember(item.text);
-  if (hasDeviceVoice(lang)) { speakDevice(item.text, lang, done); return; }
-  const live = app().liveId;
-  const n = item.id.startsWith("seg-") ? Number(item.id.slice(4)) : NaN;
-  const task = live && Number.isFinite(n)
-    ? voiceFile(live, n).then(async (path) => { if (path && g === gen) { const b = await audioBlob(path); if (b && g === gen) await playBlob(b); } })
-    : cloudSpeak(item.text);
-  task.catch((e) => console.warn("cloud voice", e)).finally(done);
+  speakItem(item, g).catch((e) => console.warn("voice", e)).finally(done);
+}
+
+async function speakItem({ text, pid, n, voice }: Item, g: number) {
+  const lang = Lang.of(text);
+  const device = hasDeviceVoice(lang);
+  // Noted as the sound starts: Gemini's can come seconds later.
+  const starting = () => { remember(text); setApp({ ttsSpeaking: true }); };
+  // Gemini was picked, or is the only voice for this language.
+  const made = voice ?? (!device && pid && Number.isFinite(n) ? voiceFile(pid, n) : null);
+  if (made) {
+    setApp({ ttsSpeaking: false });
+    const path = await (device ? withTimeout(made, GEMINI_WAIT_MS).catch(() => null) : made);
+    const b = path && g === gen ? await audioBlob(path).catch(() => null) : null;
+    if (g !== gen) return;
+    if (b) { starting(); await playBlob(b); return; }
+  }
+  if (device) {
+    starting();
+    await new Promise<void>((resolve) => { speakDevice(text, lang, resolve); });
+  } else if (!made) {
+    starting();
+    await cloudSpeak(text);
+  }
 }
 
 /** Stops speaking and drops what was waiting. */
@@ -327,32 +376,41 @@ export function stop() {
 
 // ---------- Saying one piece on tap (PlayAll.say) ----------
 
-export async function sayOnTap(text: string, key: string, onState: (playing: boolean) => void) {
+export async function sayOnTap(text: string, key: string, onState: (playing: boolean) => void, pid = app().viewId) {
   stop();
   if (!text.trim()) return;
+  const g = gen;
   onState(true);
   const finish = () => onState(false);
-  const pid = app().viewId;
   const id = Number(key);
   const c = pid && Number.isFinite(id) ? caption(pid, id) : undefined;
   const have = c ? savedVoice(c, text) : null;
+  const wants = wantsGemini(pid, c, text);
+  const lang = Lang.of(text);
+  const device = !(pid && c && alwaysGemini(pid, c)) && hasDeviceVoice(lang);
   remember(text);
-  if (have) {
+  if (have && (wants || !device)) {
     const b = await audioBlob(have);
+    if (g !== gen) { finish(); return; }
     if (b) { await playBlob(b); finish(); return; }
   }
-  const lang = Lang.of(text);
-  if (!(pid && c && alwaysGemini(pid, c)) && hasDeviceVoice(lang)) { speakDevice(text, lang, finish); return; }
+  if (device && (!wants || !navigator.onLine)) {
+    if (wants) toast("No internet · using the device's voice");
+    speakDevice(text, lang, finish);
+    return;
+  }
   try {
     if (pid && c) {
       const path = await voiceFile(pid, id);
       const b = path ? await audioBlob(path) : null;
-      if (b) await playBlob(b);
-      else toast(voiceProblem(pid, id));
-    } else await cloudSpeak(text);
+      if (g !== gen) { finish(); return; }
+      if (b) { remember(text); await playBlob(b); finish(); return; }
+      toast(voiceProblem(pid, id));
+    } else { await cloudSpeak(text); finish(); return; }
   } catch (e) {
     toast(whyFailed(e));
   }
+  if (device && g === gen) { remember(text); speakDevice(text, lang, finish); return; }
   finish();
 }
 

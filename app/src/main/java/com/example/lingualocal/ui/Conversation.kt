@@ -1273,7 +1273,7 @@ private fun sendTyped(space: com.example.lingualocal.ProjectSpace, input: String
     }
     if (pair.transcribeOnly) {
         // Typed here to be heard, so it plays whatever the speaker switch says; the voice is saved with the piece.
-        PlayAll.say(input, id.toString())
+        PlayAll.say(input, id.toString(), space)
         return
     }
     scope.launch(kotlinx.coroutines.NonCancellable) {
@@ -1286,7 +1286,7 @@ private fun sendTyped(space: com.example.lingualocal.ProjectSpace, input: String
                     engine = if (pair.worksOffline) Lang.DEVICE_ENGINE else Lang.cloudEngine(Config.CLOUD_TEXT_MODEL),
                 )
             }
-            if (AppState.speakAloud.value) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { PlayAll.say(t.trim(), id.toString()) }
+            if (AppState.speakAloud.value) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { PlayAll.say(t.trim(), id.toString(), space) }
         }.onFailure { e ->
             space.updateCaption(id) {
                 it.copy(status = SegmentStatus.QUEUED, note = if (pair.worksOffline) "Offline translation failed: ${e.message?.take(60)}" else "Couldn't translate (needs internet)")

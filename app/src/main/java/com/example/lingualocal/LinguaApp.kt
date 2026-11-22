@@ -1,6 +1,8 @@
 package com.example.lingualocal
 
 import android.app.Application
+import com.example.lingualocal.audio.VoiceChoice
+import com.example.lingualocal.audio.VoiceRules
 import com.google.firebase.Firebase
 import com.google.firebase.appcheck.appCheck
 import com.google.firebase.appcheck.debug.DebugAppCheckProviderFactory
@@ -24,6 +26,7 @@ class LinguaApp : Application() {
         com.example.lingualocal.audio.People.init(this)
         com.example.lingualocal.ai.ProjectNamer.init()
         com.example.lingualocal.audio.PlayAll.init(this)
+        loadVoices() // before any voice is made
         com.example.lingualocal.audio.TranslationVoice.init(this)
         com.example.lingualocal.audio.SegmentAudio.clearLegacy(this)
         com.example.lingualocal.ai.SegmentTranslator.clearParked(this)
@@ -67,7 +70,29 @@ class LinguaApp : Application() {
         )
     }
 
+    /** The voice picked for each language, kept between launches. */
+    private fun loadVoices() {
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        val save = { voices: Map<String, VoiceChoice> ->
+            prefs.edit().apply {
+                voices.forEach { (lang, v) -> putString("$KEY_VOICE$lang", v.engine.id); putLong("$KEY_VOICE_SINCE$lang", v.since) }
+            }.apply()
+        }
+        val voices = VoiceRules.DEFAULTS.mapValues { (lang, default) ->
+            VoiceRules.engine(prefs.getString("$KEY_VOICE$lang", null))
+                ?.let { VoiceChoice(it, prefs.getLong("$KEY_VOICE_SINCE$lang", 0)) }
+                // First run: what's already in the projects isn't made again.
+                ?: default.copy(since = now)
+        }
+        AppState.voices.value = voices
+        save(voices)
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { AppState.voices.drop(1).collect { save(it) } }
+    }
+
     private companion object {
+        const val KEY_VOICE = "voice_"
+        const val KEY_VOICE_SINCE = "voice_since_"
         const val KEY_SPEAK = "speak_aloud"
     }
 }
